@@ -43,7 +43,7 @@ identity = oneid.enroll(request_tier="declared", key_algorithm="rsa-4096")    # 
 ## Installation
 
 ```bash
-pip install oneid-sdk
+pip install oneid
 ```
 
 Requires Python 3.10+.
