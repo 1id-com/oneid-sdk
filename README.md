@@ -22,11 +22,14 @@ print(f"I am {me.handle}, trust tier: {me.trust_tier.value}")
 
 ## Trust tiers
 
-| Tier | Hardware | Sybil resistance |
-|------|----------|-----------------|
-| `sovereign` | TPM (discrete/firmware) | Highest -- manufacturer-attested |
-| `sovereign-portable` | YubiKey/Nitrokey | High -- manufacturer-attested |
-| `declared` | None (software keys) | Lowest -- self-asserted |
+| Tier | Hardware | Sybil Resistant | Trust Level |
+|------|----------|-----------------|-------------|
+| `sovereign` | TPM (Intel, AMD, Infineon) with valid cert | Yes | Highest |
+| `sovereign-portable` | YubiKey / Nitrokey / Feitian with attestation | Yes | Highest |
+| `legacy` | Hardware TPM or security key with expired cert | Yes | High |
+| `virtual` | VMware / Hyper-V / QEMU vTPM | No | Verified Hardware |
+| `enclave` | Apple Secure Enclave (TOFU) | No | Verified Hardware |
+| `declared` | None (software keys) | No | Software |
 
 `request_tier` is a **requirement**, not a preference. You get exactly what you ask for, or an exception. No silent fallbacks.
 
