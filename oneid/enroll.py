@@ -285,21 +285,29 @@ def _enroll_hsm_tier(
   attestation_data = extract_attestation_data(selected_hsm)
 
   # Step 4: Begin enrollment with server
+  # Send EK cert + AK public key + AK TPMT_PUBLIC to the server.
+  # Server runs MakeCredential and returns credential_blob + encrypted_secret.
   api_client = OneIDAPIClient(api_base_url=api_base_url)
   begin_response = api_client.enroll_begin(
     ek_certificate_pem=attestation_data["ek_cert_pem"],
-    ak_public_key_pem=attestation_data["ak_public_pem"],
+    ak_public_key_pem=attestation_data.get("ak_public_pem", ""),
+    ak_tpmt_public_b64=attestation_data.get("ak_tpmt_public_b64", ""),
+    ek_public_key_pem=attestation_data.get("ek_public_pem", ""),
     ek_certificate_chain_pem=attestation_data.get("chain_pem", []),
     hsm_type=selected_hsm.get("type", "tpm"),
     operator_email=operator_email,
     requested_handle=requested_handle,
   )
 
-  # Step 5: Activate credential via TPM (requires elevation)
+  # Step 5: Activate credential via TPM (requires elevation).
+  # The server returned credential_blob and encrypted_secret (from MakeCredential).
+  # We pass these to the Go binary, which calls TPM2_ActivateCredential to decrypt.
   from .helper import activate_credential
   decrypted_credential = activate_credential(
     selected_hsm,
-    begin_response["credential_activation_challenge"],
+    credential_blob_b64=begin_response["credential_blob"],
+    encrypted_secret_b64=begin_response["encrypted_secret"],
+    ak_handle=attestation_data.get("ak_handle", "0x81000100"),
   )
 
   # Step 6: Complete enrollment with server

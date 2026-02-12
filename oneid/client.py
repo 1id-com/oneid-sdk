@@ -162,6 +162,8 @@ class OneIDAPIClient:
     self,
     ek_certificate_pem: str,
     ak_public_key_pem: str,
+    ak_tpmt_public_b64: str = "",
+    ek_public_key_pem: str = "",
     ek_certificate_chain_pem: list[str] | None = None,
     hsm_type: str = "tpm",
     operator_email: str | None = None,
@@ -171,19 +173,22 @@ class OneIDAPIClient:
 
     This is the first step of the two-phase enrollment flow. The server
     validates the attestation chain and returns a credential activation
-    challenge that the TPM/HSM must decrypt to prove possession.
+    challenge (credential_blob + encrypted_secret) that the TPM must
+    decrypt via ActivateCredential to prove possession.
 
     Args:
         ek_certificate_pem: PEM-encoded EK certificate (TPM) or attestation cert (YubiKey).
         ak_public_key_pem: PEM-encoded public key of the Attestation Identity Key.
+        ak_tpmt_public_b64: Base64-encoded marshaled TPMT_PUBLIC of the AK.
+            Required for TPM enrollment (server uses it to compute AK Name for MakeCredential).
         ek_certificate_chain_pem: Optional intermediate CA certs found on the client (best-effort).
         hsm_type: Type of HSM ('tpm', 'yubikey', 'nitrokey', etc.).
         operator_email: Optional human operator contact email.
         requested_handle: Optional vanity handle to claim.
 
     Returns:
-        Server response containing enrollment_session_id, credential_activation_challenge,
-        trust_tier classification, and session expiry.
+        Server response containing enrollment_session_id, credential_blob,
+        encrypted_secret, trust_tier classification, and session expiry.
 
     Raises:
         AlreadyEnrolledError: If this HSM is already enrolled.
@@ -193,7 +198,9 @@ class OneIDAPIClient:
     """
     request_body: dict[str, Any] = {
       "ek_certificate_pem": ek_certificate_pem,
+      "ek_public_key_pem": ek_public_key_pem,
       "ak_public_key_pem": ak_public_key_pem,
+      "ak_tpmt_public_b64": ak_tpmt_public_b64,
       "hsm_type": hsm_type,
     }
     if ek_certificate_chain_pem:
