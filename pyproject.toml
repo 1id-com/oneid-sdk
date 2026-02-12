@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oneid-sdk"
+version = "0.1.0"
+description = "Hardware-anchored identity SDK for AI agents -- 1id.com"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [
+  {name = "Christopher Drake", email = "chris@1id.com"},
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Security",
+  "Topic :: Security :: Cryptography",
+  "Topic :: System :: Hardware",
+]
+keywords = ["identity", "ai", "agent", "tpm", "hardware", "oidc", "oauth2", "sybil"]
+
+dependencies = [
+  "httpx>=0.24.0",
+  "cryptography>=41.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+  "pytest-cov>=4.0",
+  "ruff>=0.1.0",
+  "mypy>=1.0",
+]
+
+[project.urls]
+Homepage = "https://1id.com"
+Documentation = "https://1id.com/enroll.md"
+Repository = "https://github.com/AuraFriday/oneid-sdk"
+Issues = "https://github.com/AuraFriday/oneid-sdk/issues"
+
+[tool.setuptools.packages.find]
+include = ["oneid*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "S", "B", "A", "C4", "DTZ", "T20", "ICN"]
+ignore = ["S101"]  # Allow assert in tests
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
