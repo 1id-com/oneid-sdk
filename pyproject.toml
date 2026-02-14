@@ -41,6 +41,9 @@ dev = [
   "mypy>=1.0",
 ]
 
+[project.scripts]
+oneid = "oneid.__main__:main"
+
 [project.urls]
 Homepage = "https://1id.com"
 Documentation = "https://1id.com/enroll.md"
