@@ -238,7 +238,7 @@ class OneIDAPIClient:
     """Look up public identity information for an agent.
 
     Args:
-        agent_id: The agent's internal ID (e.g., '1id_a7b3c9d2').
+        agent_id: The agent's internal ID (e.g., '1id-a7b3c9d2').
 
     Returns:
         Public identity data (internal_id, handle, trust_tier, etc.).
@@ -253,7 +253,7 @@ class OneIDAPIClient:
     """Get an OAuth2 access token using the client_credentials grant.
 
     Args:
-        client_id: The Keycloak client ID (e.g., '1id_a7b3c9d2').
+        client_id: The Keycloak client ID (e.g., '1id-a7b3c9d2').
         client_secret: The Keycloak client secret.
 
     Returns:

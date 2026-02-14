@@ -35,7 +35,7 @@ from oneid.exceptions import NotEnrolledError, OneIDError
 def _make_test_credentials(**overrides) -> StoredCredentials:
   """Create a StoredCredentials instance with sensible test defaults."""
   defaults = {
-    "client_id": "1id_t3stag7x",
+    "client_id": "1id-t3stag7x",
     "client_secret": "test-secret-value-not-for-production",
     "token_endpoint": "https://1id.com/realms/agents/protocol/openid-connect/token",
     "api_base_url": "https://1id.com",
@@ -115,11 +115,11 @@ class TestSaveAndLoadCredentials:
 
   def test_save_overwrites_existing_credentials(self, isolated_credentials_directory):
     """Saving new credentials should overwrite old ones."""
-    save_credentials(_make_test_credentials(client_id="1id_old_one1"))
-    save_credentials(_make_test_credentials(client_id="1id_new_one2"))
+    save_credentials(_make_test_credentials(client_id="1id-old-one1"))
+    save_credentials(_make_test_credentials(client_id="1id-new-one2"))
 
     loaded = load_credentials()
-    assert loaded.client_id == "1id_new_one2"
+    assert loaded.client_id == "1id-new-one2"
 
   def test_credentials_file_is_valid_json(self, isolated_credentials_directory):
     """The credentials file must be valid, human-readable JSON."""

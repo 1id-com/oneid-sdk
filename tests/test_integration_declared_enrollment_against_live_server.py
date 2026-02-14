@@ -76,7 +76,7 @@ class TestDeclaredEnrollmentAgainstLiveServer:
 
     assert isinstance(identity, Identity)
     assert identity.internal_id.startswith("1id_")
-    # Handle should be @1id_XXXXXXXX (the internal ID)
+    # Handle should be @1id-XXXXXXXX (the internal ID)
     assert identity.handle.startswith("@1id_") or identity.handle.startswith("@")
     assert identity.trust_tier == TrustTier.DECLARED
     print(f"\n  Enrolled: {identity.internal_id} as {identity.handle}")

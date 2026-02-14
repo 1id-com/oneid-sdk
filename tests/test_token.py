@@ -28,7 +28,7 @@ from oneid.identity import Token
 
 def _make_test_stored_credentials() -> StoredCredentials:
   return StoredCredentials(
-    client_id="1id_t3stag7x",
+    client_id="1id-t3stag7x",
     client_secret="test-secret",
     token_endpoint="https://1id.com/realms/agents/protocol/openid-connect/token",
     api_base_url="https://1id.com",

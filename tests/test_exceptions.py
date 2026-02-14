@@ -155,7 +155,7 @@ class TestServerErrorCodeMapping:
 
   def test_server_error_message_preserved_in_exception(self):
     """The server's error message should appear in the raised exception."""
-    server_message = "Handle 'clawdia' is already in use by 1id_abc12345"
+    server_message = "Handle 'clawdia' is already in use by 1id-abc12345"
     with pytest.raises(HandleTakenError) as exc_info:
       raise_from_server_error_response("HANDLE_TAKEN", server_message)
     assert server_message in str(exc_info.value)

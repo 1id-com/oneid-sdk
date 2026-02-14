@@ -73,11 +73,11 @@ class Identity:
   All fields are read-only (frozen dataclass).
 
   Attributes:
-      internal_id: Permanent unique identifier (e.g., '1id_a7b3c9d2').
+      internal_id: Permanent unique identifier (e.g., '1id-a7b3c9d2').
                    This is the 'sub' claim in JWTs, the database primary key.
                    Format: '1id_' prefix + 8 characters of base36 (a-z, 0-9).
                    NEVER changes, NEVER reused even after revocation.
-      handle: Display name (e.g., '@clawdia' or '@1id_a7b3c9d2').
+      handle: Display name (e.g., '@clawdia' or '@1id-a7b3c9d2').
               If no vanity handle is registered, this is '@' + first 8 chars of internal_id.
               Vanity handles are display-only; internal_id is the real identity.
       trust_tier: The trust level assigned based on hardware attestation.

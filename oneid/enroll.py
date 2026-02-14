@@ -78,7 +78,7 @@ def enroll(
 
       requested_handle: Optional. Vanity handle to claim (e.g., 'clawdia').
           Without '@' prefix. If not specified, the agent gets a random
-          handle based on its internal ID (e.g., '@1id_a7b3c9d2').
+          handle based on its internal ID (e.g., '@1id-a7b3c9d2').
 
       key_algorithm: Optional. Key algorithm for declared-tier enrollment.
           Default: 'ed25519' (strongest, fastest, smallest keys).

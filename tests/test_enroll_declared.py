@@ -42,8 +42,8 @@ class TestDeclaredTierEnrollment:
 
       identity = enroll(request_tier="declared")
 
-    assert identity.internal_id == "1id_t3stag7x"
-    assert identity.handle == "@1id_t3stag7x"
+    assert identity.internal_id == "1id-t3stag7x"
+    assert identity.handle == "@1id-t3stag7x"
     assert identity.trust_tier == TrustTier.DECLARED
     assert identity.key_algorithm == KeyAlgorithm.ED25519  # default
 
@@ -61,7 +61,7 @@ class TestDeclaredTierEnrollment:
 
     # Credentials should now exist and be loadable
     creds = load_credentials()
-    assert creds.client_id == "1id_t3stag7x"
+    assert creds.client_id == "1id-t3stag7x"
     assert creds.client_secret == "test-secret-do-not-use-in-production"
     assert creds.trust_tier == "declared"
     assert creds.private_key_pem is not None

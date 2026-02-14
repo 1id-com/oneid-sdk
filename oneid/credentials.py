@@ -45,7 +45,7 @@ class StoredCredentials:
   without re-enrolling.
 
   Attributes:
-      client_id: The 1id internal ID (e.g., '1id_a7b3c9d2'), used as
+      client_id: The 1id internal ID (e.g., '1id-a7b3c9d2'), used as
                  OAuth2 client_id for the client_credentials grant.
       client_secret: OAuth2 client secret issued by Keycloak.
       token_endpoint: Full URL of the Keycloak token endpoint.

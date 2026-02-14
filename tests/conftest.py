@@ -32,14 +32,14 @@ def mock_server_declared_enrollment_response():
     "ok": True,
     "data": {
       "identity": {
-        "internal_id": "1id_t3stag7x",
-        "handle": "@1id_t3stag7x",
+        "internal_id": "1id-t3stag7x",
+        "handle": "@1id-t3stag7x",
         "trust_tier": "declared",
         "tpm_manufacturer": None,
         "registered_at": "2026-02-11T12:00:00Z",
       },
       "credentials": {
-        "client_id": "1id_t3stag7x",
+        "client_id": "1id-t3stag7x",
         "client_secret": "test-secret-do-not-use-in-production",
         "token_endpoint": "https://1id.com/realms/agents/protocol/openid-connect/token",
         "grant_type": "client_credentials",
@@ -63,7 +63,7 @@ def mock_server_error_ek_already_registered():
     "data": None,
     "error": {
       "code": "EK_ALREADY_REGISTERED",
-      "message": "This TPM endorsement key is already associated with identity 1id_existing1",
+      "message": "This TPM endorsement key is already associated with identity 1id-existing1",
     },
   }
 
