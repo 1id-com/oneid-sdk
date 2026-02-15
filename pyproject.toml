@@ -47,8 +47,8 @@ oneid = "oneid.__main__:main"
 [project.urls]
 Homepage = "https://1id.com"
 Documentation = "https://1id.com/enroll.md"
-Repository = "https://github.com/AuraFriday/oneid-sdk"
-Issues = "https://github.com/AuraFriday/oneid-sdk/issues"
+Repository = "https://github.com/1id-com/oneid-sdk"
+Issues = "https://github.com/1id-com/oneid-sdk/issues"
 
 [tool.setuptools.packages.find]
 include = ["oneid*"]
