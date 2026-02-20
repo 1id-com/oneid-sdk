@@ -132,6 +132,13 @@ def enroll(
       key_algorithm=resolved_key_algorithm,
       api_base_url=api_base_url,
     )
+  elif tier == TrustTier.SOVEREIGN_PORTABLE:
+    return _enroll_piv_tier(
+      request_tier=tier,
+      operator_email=operator_email,
+      requested_handle=requested_handle,
+      api_base_url=api_base_url,
+    )
   elif tier in TIERS_REQUIRING_HSM:
     return _enroll_hsm_tier(
       request_tier=tier,
@@ -221,6 +228,130 @@ def _enroll_declared_tier(
     enrolled_at=enrolled_at,
     device_count=0,
     key_algorithm=key_algorithm,
+  )
+
+
+def _enroll_piv_tier(
+  request_tier: TrustTier,
+  operator_email: str | None,
+  requested_handle: str | None,
+  api_base_url: str,
+) -> Identity:
+  """Enroll at the sovereign-portable tier using a PIV device (YubiKey).
+
+  This uses the Go binary (oneid-enroll) to:
+  1. Detect available HSMs and select a PIV device
+  2. Extract PIV attestation data (no elevation needed)
+  3. Send attestation to the PIV-specific server endpoint
+  4. Receive a nonce challenge
+  5. Sign the nonce with the PIV key (no elevation needed)
+  6. Send the signed nonce to the activate endpoint
+  7. Receive identity + OAuth2 credentials
+  8. Store credentials locally
+
+  Args:
+      request_tier: The tier being requested (sovereign-portable).
+      operator_email: Optional human contact email.
+      requested_handle: Optional vanity handle.
+      api_base_url: API base URL.
+
+  Returns:
+      The enrolled Identity.
+
+  Raises:
+      NoHSMError: No compatible PIV device found.
+      BinaryNotFoundError: Go binary not available.
+      HSMAccessError: PIV device found but access failed.
+  """
+  from .helper import (
+    detect_available_hsms,
+    extract_attestation_data,
+    sign_challenge_with_piv,
+  )
+
+  logger.info("Enrolling at %s tier (PIV device required)", request_tier.value)
+
+  detected_hsms = detect_available_hsms()
+  if not detected_hsms:
+    raise NoHSMError(
+      f"No hardware security module found. "
+      f"The '{request_tier.value}' tier requires a YubiKey or similar PIV device."
+    )
+
+  selected_hsm = _select_hsm_for_tier(detected_hsms, request_tier)
+  if selected_hsm is None:
+    raise NoHSMError(
+      f"Found HSM(s) ({', '.join(h.get('type', 'unknown') for h in detected_hsms)}) "
+      f"but none are compatible with the '{request_tier.value}' tier."
+    )
+
+  attestation_data = extract_attestation_data(selected_hsm)
+
+  api_client = OneIDAPIClient(api_base_url=api_base_url)
+  begin_response = api_client.enroll_begin_piv(
+    attestation_cert_pem=attestation_data["attestation_cert_pem"],
+    attestation_chain_pem=attestation_data.get("attestation_chain_pem", []),
+    signing_key_public_pem=attestation_data["signing_key_public_pem"],
+    hsm_type=selected_hsm.get("type", "yubikey"),
+    operator_email=operator_email,
+    requested_handle=requested_handle,
+  )
+
+  nonce_challenge_b64 = begin_response["nonce_challenge"]
+
+  sign_result = sign_challenge_with_piv(nonce_challenge_b64)
+  signed_nonce_b64 = sign_result["signature_b64"]
+
+  activate_response = api_client.enroll_activate(
+    enrollment_session_id=begin_response["enrollment_session_id"],
+    decrypted_credential=signed_nonce_b64,
+  )
+
+  identity_data = activate_response.get("identity", {})
+  credentials_data = activate_response.get("credentials", {})
+
+  internal_id = identity_data.get("internal_id", "")
+  handle = identity_data.get("handle", f"@{internal_id[:12]}")
+  trust_tier_str = identity_data.get("trust_tier", request_tier.value)
+  enrolled_at_str = identity_data.get("registered_at", datetime.now(timezone.utc).isoformat())
+
+  stored_credentials = StoredCredentials(
+    client_id=credentials_data.get("client_id", internal_id),
+    client_secret=credentials_data.get("client_secret", ""),
+    token_endpoint=credentials_data.get("token_endpoint", f"{api_base_url}/realms/agents/protocol/openid-connect/token"),
+    api_base_url=api_base_url,
+    trust_tier=trust_tier_str,
+    key_algorithm="ecdsa-p256",
+    hsm_key_reference="piv-slot-9a",
+    enrolled_at=enrolled_at_str,
+  )
+  save_credentials(stored_credentials)
+
+  try:
+    enrolled_at = datetime.fromisoformat(enrolled_at_str.replace("Z", "+00:00"))
+  except (ValueError, AttributeError):
+    enrolled_at = datetime.now(timezone.utc)
+
+  try:
+    trust_tier = TrustTier(trust_tier_str)
+  except ValueError:
+    trust_tier = request_tier
+
+  hsm_type_str = selected_hsm.get("type", "yubikey")
+  try:
+    hsm_type = HSMType(hsm_type_str)
+  except ValueError:
+    hsm_type = HSMType.YUBIKEY
+
+  return Identity(
+    internal_id=internal_id,
+    handle=handle,
+    trust_tier=trust_tier,
+    hsm_type=hsm_type,
+    hsm_manufacturer=selected_hsm.get("manufacturer"),
+    enrolled_at=enrolled_at,
+    device_count=identity_data.get("device_count", 1),
+    key_algorithm=KeyAlgorithm.ECDSA_P256,
   )
 
 

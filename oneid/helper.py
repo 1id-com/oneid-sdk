@@ -42,7 +42,7 @@ from .exceptions import (
 
 # -- GitHub release URL for auto-download --
 GITHUB_RELEASE_DOWNLOAD_URL_TEMPLATE = (
-  "https://github.com/1id-com/oneid-enroll/releases/latest/download/{binary_name}"
+  "https://github.com/AuraFriday/oneid-enroll/releases/latest/download/{binary_name}"
 )
 
 logger = logging.getLogger("oneid.helper")
@@ -52,7 +52,7 @@ BINARY_NAME_PREFIX = "oneid-enroll"
 BINARY_VERSION = "0.1.0"
 
 # -- Download URLs --
-BINARY_DOWNLOAD_BASE_URL = "https://github.com/1id-com/oneid-enroll/releases/latest"
+BINARY_DOWNLOAD_BASE_URL = "https://github.com/AuraFriday/oneid-enroll/releases/latest"
 
 
 def _get_platform_binary_name() -> str:
@@ -297,7 +297,7 @@ def ensure_binary_available() -> Path:
       f"oneid-enroll binary not found in cache, current directory, or PATH, "
       f"and auto-download failed: {download_error}. "
       f"Expected filename: {binary_name}. "
-      f"Manual download: https://github.com/1id-com/oneid-enroll/releases/latest"
+      f"Manual download: https://github.com/AuraFriday/oneid-enroll/releases/latest"
     ) from download_error
 
 
@@ -751,6 +751,38 @@ class ElevatedSession:
     self._conn_socket = None
     self._server_socket = None
     self._process = None
+
+
+def sign_challenge_with_piv(nonce_b64: str) -> dict:
+  """Sign a challenge nonce using the PIV key in slot 9a -- NO ELEVATION NEEDED.
+
+  This is the core of PIV-backed challenge-response during enrollment.
+  The agent signs the server-provided nonce, proving it controls the
+  YubiKey that was attested during enrollment begin.
+
+  PIV slot 9a with pin-policy=NEVER means no human interaction required.
+
+  Args:
+      nonce_b64: Base64-encoded nonce from the server.
+
+  Returns:
+      Dict with:
+        - signature_b64: Base64-encoded ECDSA-SHA256 signature
+        - algorithm: "ECDSA-SHA256"
+        - serial_number: YubiKey serial number string
+
+  Raises:
+      NoHSMError: If no PIV device is accessible.
+      HSMAccessError: If signing fails.
+  """
+  output = _run_binary_command(
+    "sign",
+    args=[
+      "--nonce", nonce_b64,
+      "--type", "yubikey",
+    ],
+  )
+  return output
 
 
 def sign_challenge_with_tpm(nonce_b64: str, ak_handle: str) -> dict:

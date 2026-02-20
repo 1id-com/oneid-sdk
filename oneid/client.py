@@ -30,7 +30,7 @@ logger = logging.getLogger("oneid.client")
 
 # -- HTTP client configuration --
 DEFAULT_HTTP_TIMEOUT_SECONDS = 30.0
-USER_AGENT = "oneid-sdk-python/0.1.0"
+USER_AGENT = "oneid-sdk-python/0.2.0"
 
 
 class OneIDAPIClient:
@@ -211,6 +211,53 @@ class OneIDAPIClient:
       request_body["requested_handle"] = requested_handle
 
     return self._make_request("POST", "/api/v1/enroll/begin", json_body=request_body)
+
+  def enroll_begin_piv(
+    self,
+    attestation_cert_pem: str,
+    attestation_chain_pem: list[str],
+    signing_key_public_pem: str,
+    hsm_type: str = "yubikey",
+    operator_email: str | None = None,
+    requested_handle: str | None = None,
+  ) -> dict[str, Any]:
+    """Begin PIV-based enrollment (sovereign-portable tier).
+
+    This is the first step of the two-phase PIV enrollment flow. The server
+    validates the attestation certificate chain against the Yubico Root CA,
+    checks the anti-Sybil registry by device serial number, and returns a
+    nonce challenge that the PIV key must sign to prove possession.
+
+    Args:
+        attestation_cert_pem: PEM-encoded slot attestation certificate from the PIV device.
+        attestation_chain_pem: List of PEM-encoded intermediate CA certs (typically the F9 cert).
+        signing_key_public_pem: PEM-encoded ECDSA public key of the PIV signing key (slot 9a).
+        hsm_type: Type of PIV device ('yubikey').
+        operator_email: Optional human operator contact email.
+        requested_handle: Optional vanity handle to claim.
+
+    Returns:
+        Server response containing enrollment_session_id, nonce_challenge,
+        trust_tier classification, device_serial, and session expiry.
+
+    Raises:
+        AlreadyEnrolledError: If this PIV device serial is already enrolled.
+        HandleTakenError: If the requested handle is taken.
+        EnrollmentError: If the attestation cert is invalid or chain is untrusted.
+        NetworkError: If the server cannot be reached.
+    """
+    request_body: dict[str, Any] = {
+      "attestation_cert_pem": attestation_cert_pem,
+      "attestation_chain_pem": attestation_chain_pem,
+      "signing_key_public_pem": signing_key_public_pem,
+      "hsm_type": hsm_type,
+    }
+    if operator_email is not None:
+      request_body["operator_email"] = operator_email
+    if requested_handle is not None:
+      request_body["requested_handle"] = requested_handle
+
+    return self._make_request("POST", "/api/v1/enroll/begin/piv", json_body=request_body)
 
   def enroll_activate(
     self,
