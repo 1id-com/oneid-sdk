@@ -42,17 +42,17 @@ from .exceptions import (
 
 # -- GitHub release URL for auto-download --
 GITHUB_RELEASE_DOWNLOAD_URL_TEMPLATE = (
-  "https://github.com/AuraFriday/oneid-enroll/releases/latest/download/{binary_name}"
+  "https://github.com/1id-com/oneid-enroll/releases/latest/download/{binary_name}"
 )
 
 logger = logging.getLogger("oneid.helper")
 
 # -- Binary naming convention --
 BINARY_NAME_PREFIX = "oneid-enroll"
-BINARY_VERSION = "0.1.0"
+BINARY_VERSION = "0.2.0"
 
 # -- Download URLs --
-BINARY_DOWNLOAD_BASE_URL = "https://github.com/AuraFriday/oneid-enroll/releases/latest"
+BINARY_DOWNLOAD_BASE_URL = "https://github.com/1id-com/oneid-enroll/releases/latest"
 
 
 def _get_platform_binary_name() -> str:
@@ -297,7 +297,7 @@ def ensure_binary_available() -> Path:
       f"oneid-enroll binary not found in cache, current directory, or PATH, "
       f"and auto-download failed: {download_error}. "
       f"Expected filename: {binary_name}. "
-      f"Manual download: https://github.com/AuraFriday/oneid-enroll/releases/latest"
+      f"Manual download: https://github.com/1id-com/oneid-enroll/releases/latest"
     ) from download_error
 
 

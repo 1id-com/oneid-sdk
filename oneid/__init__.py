@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 1id.com SDK -- Hardware-anchored identity for AI agents.
 
@@ -52,6 +54,8 @@ from .identity import (
   TrustTier,
 )
 from .keys import sign_challenge_with_private_key
+from .attestation import prepare_attestation, AttestationProof
+from . import mailpal
 from ._version import __version__
 
 
@@ -128,6 +132,9 @@ __all__ = [
   "refresh",
   "credentials_exist",
   "sign_challenge_with_private_key",
+  "prepare_attestation",
+  "AttestationProof",
+  "mailpal",
   # Data types
   "Identity",
   "Token",

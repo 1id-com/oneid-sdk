@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Exception hierarchy for the 1id.com SDK.
 

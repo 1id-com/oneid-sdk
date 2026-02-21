@@ -20,9 +20,11 @@ from .client import OneIDAPIClient
 from .credentials import (
   DEFAULT_API_BASE_URL,
   StoredCredentials,
+  get_credentials_file_path,
   save_credentials,
 )
 from .exceptions import (
+  AlreadyEnrolledError,
   EnrollmentError,
   NoHSMError,
 )
@@ -101,6 +103,18 @@ def enroll(
       EnrollmentError: Any other enrollment failure.
       NetworkError: Could not reach the 1id.com server.
   """
+  from .credentials import credentials_exist, load_credentials
+
+  if credentials_exist():
+    existing_credentials = load_credentials()
+    raise AlreadyEnrolledError(
+      f"This agent is already enrolled as '{existing_credentials.client_id}' "
+      f"(trust tier: {existing_credentials.trust_tier}). "
+      f"Credentials file: {get_credentials_file_path()}. "
+      f"Use oneid.whoami() to check your identity, or "
+      f"oneid.credentials.delete_credentials() to re-enroll."
+    )
+
   # Validate and normalize the requested tier
   try:
     tier = TrustTier(request_tier)
