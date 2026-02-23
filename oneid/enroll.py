@@ -227,7 +227,19 @@ def _enroll_declared_tier(
   credentials_file_path = save_credentials(stored_credentials)
   logger.info("Credentials saved to %s", credentials_file_path)
 
-  # Step 5: Return Identity object
+  # Step 5: Check if agent requested a vanity handle and inform them about payment
+  if "requested_handle" in server_response:
+    handle_info = server_response["requested_handle"]
+    logger.info("Vanity handle requested: %s", handle_info.get("handle"))
+    logger.info("Handle status: %s", handle_info.get("status"))
+    if handle_info.get("status") == "available":
+      logger.info("Handle %s is available for $%.2f/year", handle_info.get("handle"), handle_info.get("annual_fee_usd", 0))
+      logger.info("To claim this handle, use: oneid.handle.purchase('%s') or oneid.handle.request('%s', operator_email='...')", handle_info.get("handle", "").lstrip("@"), handle_info.get("handle", "").lstrip("@"))
+      logger.info("Or visit: https://1id.com/handle/purchase?name=%s", handle_info.get("handle", "").lstrip("@"))
+    elif handle_info.get("status") == "reserved":
+      logger.warning("Handle %s is reserved: %s", handle_info.get("handle"), handle_info.get("message"))
+
+  # Step 6: Return Identity object
   try:
     enrolled_at = datetime.fromisoformat(enrolled_at_str.replace("Z", "+00:00"))
   except (ValueError, AttributeError):
@@ -340,6 +352,18 @@ def _enroll_piv_tier(
     enrolled_at=enrolled_at_str,
   )
   save_credentials(stored_credentials)
+
+  # Check if agent requested a vanity handle and inform them about payment
+  if "requested_handle" in complete_response:
+    handle_info = complete_response["requested_handle"]
+    logger.info("Vanity handle requested: %s", handle_info.get("handle"))
+    logger.info("Handle status: %s", handle_info.get("status"))
+    if handle_info.get("status") == "available":
+      logger.info("Handle %s is available for $%.2f/year", handle_info.get("handle"), handle_info.get("annual_fee_usd", 0))
+      logger.info("To claim this handle, use: oneid.handle.purchase('%s') or oneid.handle.request('%s', operator_email='...')", handle_info.get("handle", "").lstrip("@"), handle_info.get("handle", "").lstrip("@"))
+      logger.info("Or visit: https://1id.com/handle/purchase?name=%s", handle_info.get("handle", "").lstrip("@"))
+    elif handle_info.get("status") == "reserved":
+      logger.warning("Handle %s is reserved: %s", handle_info.get("handle"), handle_info.get("message"))
 
   try:
     enrolled_at = datetime.fromisoformat(enrolled_at_str.replace("Z", "+00:00"))
@@ -481,6 +505,18 @@ def _enroll_hsm_tier(
     enrolled_at=enrolled_at_str,
   )
   save_credentials(stored_credentials)
+
+  # Check if agent requested a vanity handle and inform them about payment
+  if "requested_handle" in activate_response:
+    handle_info = activate_response["requested_handle"]
+    logger.info("Vanity handle requested: %s", handle_info.get("handle"))
+    logger.info("Handle status: %s", handle_info.get("status"))
+    if handle_info.get("status") == "available":
+      logger.info("Handle %s is available for $%.2f/year", handle_info.get("handle"), handle_info.get("annual_fee_usd", 0))
+      logger.info("To claim this handle, use: oneid.handle.purchase('%s') or oneid.handle.request('%s', operator_email='...')", handle_info.get("handle", "").lstrip("@"), handle_info.get("handle", "").lstrip("@"))
+      logger.info("Or visit: https://1id.com/handle/purchase?name=%s", handle_info.get("handle", "").lstrip("@"))
+    elif handle_info.get("status") == "reserved":
+      logger.warning("Handle %s is reserved: %s", handle_info.get("handle"), handle_info.get("message"))
 
   try:
     enrolled_at = datetime.fromisoformat(enrolled_at_str.replace("Z", "+00:00"))

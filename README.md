@@ -20,6 +20,20 @@ me = oneid.whoami()
 print(f"I am {me.handle}, trust tier: {me.trust_tier.value}")
 ```
 
+### Hardware-backed enrollment
+
+```python
+# TPM enrollment (sovereign tier) - requires Windows/Linux with TPM 2.0
+# Will prompt for UAC/sudo elevation once during enrollment
+identity = oneid.enroll(request_tier="sovereign")
+
+# YubiKey enrollment (sovereign-portable tier) - requires YubiKey 5 inserted
+identity = oneid.enroll(request_tier="sovereign-portable")
+
+# Virtual TPM (VMware/Hyper-V/QEMU)
+identity = oneid.enroll(request_tier="virtual")
+```
+
 ## Trust tiers
 
 | Tier | Hardware | Sybil Resistant | Trust Level |

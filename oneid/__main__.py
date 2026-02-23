@@ -126,6 +126,11 @@ def _command_enroll(args: argparse.Namespace) -> int:
   print(f"Identity:   {identity.internal_id}")
   print(f"Handle:     {identity.handle}")
   print(f"Trust tier: {identity.trust_tier.value if hasattr(identity.trust_tier, 'value') else identity.trust_tier}")
+  
+  if args.handle:
+    print(f"\nNote: Vanity handle '{args.handle}' was requested.")
+    print(f"Check the log output above for payment instructions.")
+    print(f"Or visit: https://1id.com/handle/purchase?name={args.handle}")
 
   return 0
 
