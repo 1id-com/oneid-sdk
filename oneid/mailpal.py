@@ -55,11 +55,27 @@ class SendResult:
 
 @dataclass
 class MailpalAccount:
-  """Result of a mailpal.activate() call."""
+  """Result of a mailpal.activate() call when activation succeeds or account already exists."""
   primary_email: str = ""
   vanity_email: Optional[str] = None
   app_password: Optional[str] = None
   already_existed: bool = False
+  smtp: Optional[Dict[str, Any]] = None
+  imap: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class MailpalActivationChallenge:
+  """Returned by activate() when a Proof-of-Intelligence challenge must be solved.
+
+  The agent (LLM) must read the prompt, produce an answer, then call
+  activate(challenge_token=..., challenge_answer=...) to complete activation.
+  """
+  challenge_token: str = ""
+  prompt: str = ""
+  difficulty: str = "easy"
+  expires_in_seconds: int = 300
+  attempt_limit: int = 3
 
 
 @dataclass
@@ -82,22 +98,54 @@ def _get_auth_headers() -> Dict[str, str]:
 
 
 def activate(
+  challenge_token: Optional[str] = None,
+  challenge_answer: Optional[str] = None,
+  display_name: Optional[str] = None,
   mailpal_api_url: Optional[str] = None,
-) -> MailpalAccount:
+) -> "MailpalAccount | MailpalActivationChallenge":
   """
   Activate a MailPal account for the current 1id identity.
 
-  Creates the Stalwart mail account if it doesn't exist, or returns
-  the existing account info if it does. Idempotent.
+  Two-phase flow:
+
+    # Phase 1: request activation (returns a challenge to prove you're an AI)
+    result = oneid.mailpal.activate()
+    if isinstance(result, oneid.mailpal.MailpalActivationChallenge):
+        # Read result.prompt, think about it, produce an answer
+        answer = "..."  # your answer to the challenge prompt
+        account = oneid.mailpal.activate(
+            challenge_token=result.challenge_token,
+            challenge_answer=answer,
+        )
+
+    # If already activated, Phase 1 returns MailpalAccount directly (idempotent).
+
+  Args:
+    challenge_token: Token from a previous challenge response (Phase 2 only).
+    challenge_answer: Your answer to the challenge prompt (Phase 2 only).
+    display_name: Optional friendly name for the account (e.g. "Clawdia").
+    mailpal_api_url: Override the MailPal API base URL.
 
   Returns:
-    MailpalAccount with primary email, optional vanity, and app password (if new).
+    MailpalAccount if activation succeeded or account already exists.
+    MailpalActivationChallenge if a POI challenge must be solved first.
   """
   url = f"{mailpal_api_url or _MAILPAL_API_BASE_URL}/api/v1/activate"
 
+  request_body: Dict[str, Any] = {}
+  if challenge_token and challenge_answer:
+    request_body["challenge_token"] = challenge_token
+    request_body["challenge_answer"] = challenge_answer
+  if display_name:
+    request_body["display_name"] = display_name
+
   try:
     with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
-      response = client.post(url, headers=_get_auth_headers())
+      response = client.post(
+        url,
+        json=request_body if request_body else None,
+        headers=_get_auth_headers(),
+      )
   except httpx.ConnectError as error:
     raise NetworkError(f"Could not connect to MailPal: {error}") from error
   except httpx.TimeoutException as error:
@@ -105,15 +153,37 @@ def activate(
 
   if response.status_code == 401:
     raise AuthenticationError("Bearer token rejected by MailPal.")
-  if response.status_code != 200:
+  if response.status_code == 403:
+    error_info = response.json().get("error", {})
+    raise AuthenticationError(
+      f"Challenge failed: {error_info.get('message', response.text[:200])}. "
+      "Call activate() again with no arguments to get a new challenge."
+    )
+  if response.status_code == 429:
+    error_info = response.json().get("error", {})
+    raise NetworkError(f"Rate limited: {error_info.get('message', response.text[:200])}")
+
+  if response.status_code not in (200, 201):
     raise NetworkError(f"MailPal activate failed (HTTP {response.status_code}): {response.text[:200]}")
 
   data = response.json().get("data", {})
+
+  if data.get("phase") == "challenge":
+    return MailpalActivationChallenge(
+      challenge_token=data.get("challenge_token", ""),
+      prompt=data.get("prompt", ""),
+      difficulty=data.get("difficulty", "easy"),
+      expires_in_seconds=data.get("expires_in_seconds", 300),
+      attempt_limit=data.get("attempt_limit", 3),
+    )
+
   return MailpalAccount(
     primary_email=data.get("primary_email", ""),
     vanity_email=data.get("vanity_email"),
     app_password=data.get("app_password"),
-    already_existed=data.get("already_existed", False),
+    already_existed=data.get("already_activated", False),
+    smtp=data.get("smtp"),
+    imap=data.get("imap"),
   )
 
 
@@ -158,16 +228,19 @@ def send(
       api_base_url=oneid_api_url,
     )
 
+  creds = load_credentials()
+  default_from = f"{creds.client_id}@mailpal.com"
+  effective_from = from_address or default_from
+
   send_body: Dict[str, Any] = {
     "to": to,
     "subject": subject,
+    "text": text_body or "",
   }
-  if text_body:
-    send_body["text_body"] = text_body
   if html_body:
-    send_body["html_body"] = html_body
-  if from_address:
-    send_body["from"] = from_address
+    send_body["html"] = html_body
+  if effective_from:
+    send_body["from"] = effective_from
 
   if proof:
     custom_headers = {}

@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oneid"
-version = "0.3.1"
+version = "0.3.3"
 description = "Hardware-anchored identity SDK for AI agents -- 1id.com"
 readme = "README.md"
-license = "Apache-2.0"
+license = {text = "Apache-2.0"}
 requires-python = ">=3.8"
 authors = [
   {name = "Christopher Drake", email = "chris@1id.com"},
