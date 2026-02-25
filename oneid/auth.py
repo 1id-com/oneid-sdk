@@ -42,9 +42,12 @@ def get_token(
 ) -> Token:
   """Get a valid OAuth2 access token, refreshing if needed.
 
-  This is the primary authentication method for daily use. It uses
-  the OAuth2 client_credentials grant with the credentials stored
-  during enrollment.
+  This is the primary authentication method for daily use.
+
+  For sovereign and virtual tier agents with a TPM, this automatically
+  uses TPM challenge-response authentication (no passwords transmitted).
+  For all other tiers, it uses the standard OAuth2 client_credentials
+  grant. If TPM auth fails, it falls back to client_credentials.
 
   Tokens are cached in memory and automatically refreshed when they
   are within TOKEN_REFRESH_MARGIN_SECONDS of expiry.
@@ -75,7 +78,24 @@ def get_token(
   if credentials is None:
     credentials = load_credentials()
 
-  # Request a new token
+  _TIERS_SUPPORTING_TPM_AUTH = ("sovereign", "virtual")
+  this_agent_has_tpm_key = (
+    credentials.trust_tier in _TIERS_SUPPORTING_TPM_AUTH
+    and credentials.hsm_key_reference is not None
+  )
+
+  if this_agent_has_tpm_key:
+    try:
+      logger.debug("Attempting TPM-based passwordless authentication...")
+      token = authenticate_with_tpm(credentials=credentials)
+      _cached_token = token
+      return token
+    except Exception as tpm_auth_error:
+      logger.info(
+        "TPM auth failed (%s), falling back to client_credentials grant",
+        tpm_auth_error,
+      )
+
   token = _request_token_from_keycloak(credentials)
   _cached_token = token
 

@@ -45,6 +45,7 @@ def _command_whoami(args: argparse.Namespace) -> int:
   output = {
     "internal_id": identity.internal_id,
     "handle": identity.handle,
+    "display_name": identity.display_name,
     "trust_tier": identity.trust_tier.value if hasattr(identity.trust_tier, "value") else str(identity.trust_tier),
     "key_algorithm": identity.key_algorithm.value if hasattr(identity.key_algorithm, "value") else str(identity.key_algorithm),
     "enrolled_at": identity.enrolled_at.isoformat() if identity.enrolled_at else None,
@@ -55,6 +56,8 @@ def _command_whoami(args: argparse.Namespace) -> int:
   else:
     print(f"Identity:   {output['internal_id']}")
     print(f"Handle:     {output['handle']}")
+    if output["display_name"]:
+      print(f"Name:       {output['display_name']}")
     print(f"Trust tier: {output['trust_tier']}")
     print(f"Algorithm:  {output['key_algorithm']}")
     if output["enrolled_at"]:

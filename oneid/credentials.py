@@ -68,6 +68,7 @@ class StoredCredentials:
   private_key_pem: str | None = None
   hsm_key_reference: str | None = None
   enrolled_at: str | None = None
+  display_name: str | None = None
 
 
 def get_credentials_directory() -> Path:
@@ -151,11 +152,12 @@ def save_credentials(credentials: StoredCredentials) -> Path:
     "enrolled_at": credentials.enrolled_at,
   }
 
-  # Only include key fields that are present
   if credentials.private_key_pem is not None:
     credentials_dict["private_key_pem"] = credentials.private_key_pem
   if credentials.hsm_key_reference is not None:
     credentials_dict["hsm_key_reference"] = credentials.hsm_key_reference
+  if credentials.display_name is not None:
+    credentials_dict["display_name"] = credentials.display_name
 
   credentials_file_path.write_text(
     json.dumps(credentials_dict, indent=2) + "\n",
@@ -205,6 +207,7 @@ def load_credentials() -> StoredCredentials:
     private_key_pem=credentials_dict.get("private_key_pem"),
     hsm_key_reference=credentials_dict.get("hsm_key_reference"),
     enrolled_at=credentials_dict.get("enrolled_at"),
+    display_name=credentials_dict.get("display_name"),
   )
 
 

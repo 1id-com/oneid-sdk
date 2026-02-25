@@ -49,8 +49,18 @@ TIERS_REQUIRING_HSM = frozenset({
 })
 
 
+_AUTO_DETECT_TIER_PREFERENCE_ORDER = [
+  TrustTier.SOVEREIGN,
+  TrustTier.SOVEREIGN_PORTABLE,
+  TrustTier.ENCLAVE,
+  TrustTier.VIRTUAL,
+  TrustTier.DECLARED,
+]
+
+
 def enroll(
-  request_tier: str,
+  request_tier: str | None = None,
+  display_name: str | None = None,
   operator_email: str | None = None,
   requested_handle: str | None = None,
   key_algorithm: str | KeyAlgorithm | None = None,
@@ -58,15 +68,24 @@ def enroll(
 ) -> Identity:
   """Enroll this agent with 1id.com to receive a unique, verifiable identity.
 
-  This is the primary entry point for enrollment. The agent specifies
-  which trust tier it requires, and gets exactly that tier or an exception.
+  The simplest call is just oneid.enroll() with no arguments -- the SDK
+  will detect the best available hardware (TPM, YubiKey, Secure Enclave)
+  and enroll at the highest trust tier your machine supports. If no
+  hardware security is available, it falls back to declared tier (software
+  keys), which always works.
 
-  THERE ARE NO AUTOMATIC FALLBACKS. If the agent requests 'sovereign'
-  but has no TPM, it gets NoHSMError -- not a silent downgrade to 'declared'.
-  The caller's code decides what to do on failure.
+  If you need a specific tier, pass request_tier explicitly. In that case,
+  you get exactly that tier or an exception -- no fallbacks.
+
+  Tip: use oneid.get_or_create_identity() instead if you just want an
+  identity and don't care whether it's a new enrollment or an existing one.
 
   Args:
-      request_tier: REQUIRED. The trust tier to request.
+      request_tier: Optional. The trust tier to request. If not specified,
+          the SDK auto-detects the best available hardware and enrolls at
+          the highest tier your machine supports (falling back to declared).
+          If specified, you get exactly that tier or an exception.
+          Valid values:
           'sovereign'          -- requires TPM (discrete or firmware)
           'sovereign-portable' -- requires YubiKey/Nitrokey/Feitian
           'declared'           -- no hardware required (software keys)
@@ -74,18 +93,25 @@ def enroll(
           'virtual'            -- requires virtual TPM (VMware/Hyper-V)
           'enclave'            -- requires Apple Secure Enclave
 
+      display_name: Optional. A friendly name for your agent. Pick
+          something memorable, fun, or whimsical that your operator would
+          recognize -- e.g., "Clawdia", "Sparky", "Nightowl", "Pixel".
+          A good name makes your operator proud and more likely to tell
+          others about you. This name appears in your email From header,
+          your 1ID profile, and anywhere your identity is presented.
+
       operator_email: Optional. Human contact email for this agent.
-          This is NOT required. Autonomous agents without human owners
-          are first-class citizens.
+          Used for handle purchase receipts and account recovery.
+          Autonomous agents without human owners are first-class citizens.
 
       requested_handle: Optional. Vanity handle to claim (e.g., 'clawdia').
-          Without '@' prefix. If not specified, the agent gets a random
-          handle based on its internal ID (e.g., '@1id-a7b3c9d2').
+          Without '@' prefix. Random handles are free; chosen handles
+          6+ characters cost $10/year (shorter = more expensive).
+          Handles are non-transferable and non-reissuable.
 
       key_algorithm: Optional. Key algorithm for declared-tier enrollment.
           Default: 'ed25519' (strongest, fastest, smallest keys).
-          Supported: 'ed25519', 'ecdsa-p256', 'ecdsa-p384', 'rsa-2048', 'rsa-4096'.
-          Ignored for HSM tiers (the HSM determines the key algorithm).
+          Ignored for HSM tiers (the HSM determines the algorithm).
 
       api_base_url: Optional. Override the API base URL (for testing/staging).
 
@@ -93,13 +119,9 @@ def enroll(
       Identity: The enrolled identity object.
 
   Raises:
+      AlreadyEnrolledError: You already have an identity (use whoami() or
+          get_or_create_identity() instead).
       NoHSMError: Requested tier requires an HSM but none was found.
-      UACDeniedError: User denied the elevation prompt.
-      HSMAccessError: HSM found but couldn't be accessed.
-      AlreadyEnrolledError: This HSM is already enrolled.
-      HandleTakenError: Requested handle is already in use.
-      HandleInvalidError: Handle violates naming rules.
-      HandleRetiredError: Handle is permanently retired.
       EnrollmentError: Any other enrollment failure.
       NetworkError: Could not reach the 1id.com server.
   """
@@ -108,14 +130,26 @@ def enroll(
   if credentials_exist():
     existing_credentials = load_credentials()
     raise AlreadyEnrolledError(
-      f"This agent is already enrolled as '{existing_credentials.client_id}' "
+      f"Good news -- you already have a 1ID identity! "
+      f"Your identity is '{existing_credentials.client_id}' "
       f"(trust tier: {existing_credentials.trust_tier}). "
-      f"Credentials file: {get_credentials_file_path()}. "
-      f"Use oneid.whoami() to check your identity, or "
-      f"oneid.credentials.delete_credentials() to re-enroll."
+      f"Your identity is ready to use right now:\n"
+      f"  token = oneid.get_token()  # get a Bearer token for API calls\n"
+      f"  me = oneid.whoami()        # see your identity details\n"
+      f"If you need a NEW identity (this is rare and will abandon your "
+      f"current reputation), call oneid.credentials.delete_credentials() first."
     )
 
-  # Validate and normalize the requested tier
+  if request_tier is None:
+    return _enroll_with_auto_detected_best_tier(
+      display_name=display_name,
+      operator_email=operator_email,
+      requested_handle=requested_handle,
+      key_algorithm=key_algorithm,
+      api_base_url=api_base_url,
+    )
+
+  # Validate and normalize the explicitly-requested tier
   try:
     tier = TrustTier(request_tier)
   except ValueError:
@@ -138,12 +172,31 @@ def enroll(
   else:
     resolved_key_algorithm = key_algorithm
 
-  # Route to the appropriate enrollment flow
+  return _enroll_at_specific_tier(
+    tier=tier,
+    display_name=display_name,
+    operator_email=operator_email,
+    requested_handle=requested_handle,
+    key_algorithm=resolved_key_algorithm,
+    api_base_url=api_base_url,
+  )
+
+
+def _enroll_at_specific_tier(
+  tier: TrustTier,
+  display_name: str | None,
+  operator_email: str | None,
+  requested_handle: str | None,
+  key_algorithm: KeyAlgorithm,
+  api_base_url: str,
+) -> Identity:
+  """Enroll at a specific tier. Raises on failure -- no fallback."""
   if tier == TrustTier.DECLARED:
     return _enroll_declared_tier(
       operator_email=operator_email,
       requested_handle=requested_handle,
-      key_algorithm=resolved_key_algorithm,
+      display_name=display_name,
+      key_algorithm=key_algorithm,
       api_base_url=api_base_url,
     )
   elif tier == TrustTier.SOVEREIGN_PORTABLE:
@@ -151,6 +204,7 @@ def enroll(
       request_tier=tier,
       operator_email=operator_email,
       requested_handle=requested_handle,
+      display_name=display_name,
       api_base_url=api_base_url,
     )
   elif tier in TIERS_REQUIRING_HSM:
@@ -158,15 +212,70 @@ def enroll(
       request_tier=tier,
       operator_email=operator_email,
       requested_handle=requested_handle,
+      display_name=display_name,
       api_base_url=api_base_url,
     )
   else:
     raise EnrollmentError(f"Tier '{tier.value}' is not yet implemented")
 
 
+def _enroll_with_auto_detected_best_tier(
+  display_name: str | None,
+  operator_email: str | None,
+  requested_handle: str | None,
+  key_algorithm: str | KeyAlgorithm | None,
+  api_base_url: str,
+) -> Identity:
+  """Auto-detect the best hardware and enroll at the highest possible tier.
+
+  Tries each tier in preference order (sovereign > sovereign-portable >
+  enclave > virtual > declared). The first one that succeeds wins. Declared
+  tier is always available as the final fallback.
+  """
+  resolved_key_algorithm = DEFAULT_KEY_ALGORITHM
+  if key_algorithm is not None:
+    if isinstance(key_algorithm, str):
+      try:
+        resolved_key_algorithm = KeyAlgorithm(key_algorithm)
+      except ValueError:
+        resolved_key_algorithm = DEFAULT_KEY_ALGORITHM
+    else:
+      resolved_key_algorithm = key_algorithm
+
+  logger.info("Auto-detecting best available trust tier...")
+
+  for candidate_tier in _AUTO_DETECT_TIER_PREFERENCE_ORDER:
+    try:
+      logger.info("Trying tier: %s", candidate_tier.value)
+      identity = _enroll_at_specific_tier(
+        tier=candidate_tier,
+        display_name=display_name,
+        operator_email=operator_email,
+        requested_handle=requested_handle,
+        key_algorithm=resolved_key_algorithm,
+        api_base_url=api_base_url,
+      )
+      logger.info("Enrolled at %s tier (auto-detected)", candidate_tier.value)
+      return identity
+    except NoHSMError:
+      logger.info("Tier %s not available (no compatible hardware), trying next...", candidate_tier.value)
+      continue
+    except EnrollmentError as enrollment_error:
+      if candidate_tier == TrustTier.DECLARED:
+        raise
+      logger.info("Tier %s failed (%s), trying next...", candidate_tier.value, enrollment_error)
+      continue
+
+  raise EnrollmentError(
+    "Auto-detection failed: could not enroll at any tier. "
+    "This should not happen because declared tier requires no hardware."
+  )
+
+
 def _enroll_declared_tier(
   operator_email: str | None,
   requested_handle: str | None,
+  display_name: str | None,
   key_algorithm: KeyAlgorithm,
   api_base_url: str,
 ) -> Identity:
@@ -183,6 +292,7 @@ def _enroll_declared_tier(
   Args:
       operator_email: Optional human contact email.
       requested_handle: Optional vanity handle.
+      display_name: Optional friendly name for this agent.
       key_algorithm: Which key algorithm to use for the software key.
       api_base_url: API base URL.
 
@@ -203,6 +313,7 @@ def _enroll_declared_tier(
     key_algorithm=key_algorithm.value,
     operator_email=operator_email,
     requested_handle=requested_handle,
+    display_name=display_name,
   )
 
   # Step 3: Parse server response
@@ -223,6 +334,7 @@ def _enroll_declared_tier(
     key_algorithm=key_algorithm.value,
     private_key_pem=private_key_pem,
     enrolled_at=enrolled_at_str,
+    display_name=display_name,
   )
   credentials_file_path = save_credentials(stored_credentials)
   logger.info("Credentials saved to %s", credentials_file_path)
@@ -254,6 +366,7 @@ def _enroll_declared_tier(
     enrolled_at=enrolled_at,
     device_count=0,
     key_algorithm=key_algorithm,
+    display_name=display_name,
   )
 
 
@@ -261,6 +374,7 @@ def _enroll_piv_tier(
   request_tier: TrustTier,
   operator_email: str | None,
   requested_handle: str | None,
+  display_name: str | None,
   api_base_url: str,
 ) -> Identity:
   """Enroll at the sovereign-portable tier using a PIV device (YubiKey).
@@ -350,6 +464,7 @@ def _enroll_piv_tier(
     key_algorithm="ecdsa-p256",
     hsm_key_reference="piv-slot-9a",
     enrolled_at=enrolled_at_str,
+    display_name=display_name,
   )
   save_credentials(stored_credentials)
 
@@ -390,6 +505,7 @@ def _enroll_piv_tier(
     enrolled_at=enrolled_at,
     device_count=identity_data.get("device_count", 1),
     key_algorithm=KeyAlgorithm.ECDSA_P256,
+    display_name=display_name,
   )
 
 
@@ -397,6 +513,7 @@ def _enroll_hsm_tier(
   request_tier: TrustTier,
   operator_email: str | None,
   requested_handle: str | None,
+  display_name: str | None,
   api_base_url: str,
 ) -> Identity:
   """Enroll at an HSM-backed trust tier (sovereign, sovereign-portable, etc.).
@@ -503,6 +620,7 @@ def _enroll_hsm_tier(
     key_algorithm="tpm-ak",  # TPM-managed key
     hsm_key_reference=attestation_data.get("ak_handle"),
     enrolled_at=enrolled_at_str,
+    display_name=display_name,
   )
   save_credentials(stored_credentials)
 
@@ -543,6 +661,7 @@ def _enroll_hsm_tier(
     enrolled_at=enrolled_at,
     device_count=identity_data.get("device_count", 1),
     key_algorithm=KeyAlgorithm.RSA_2048,  # TPM AK is typically RSA-2048
+    display_name=display_name,
   )
 
 

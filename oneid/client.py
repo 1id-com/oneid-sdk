@@ -128,6 +128,7 @@ class OneIDAPIClient:
     key_algorithm: str,
     operator_email: str | None = None,
     requested_handle: str | None = None,
+    display_name: str | None = None,
   ) -> dict[str, Any]:
     """Enroll a new identity at the declared trust tier (no HSM required).
 
@@ -136,6 +137,7 @@ class OneIDAPIClient:
         key_algorithm: Algorithm of the key (e.g., 'ed25519', 'ecdsa-p256').
         operator_email: Optional human operator contact email.
         requested_handle: Optional vanity handle to claim (without '@' prefix).
+        display_name: Optional friendly name for the agent.
 
     Returns:
         Server response data containing identity, credentials, and initial tokens.
@@ -155,6 +157,8 @@ class OneIDAPIClient:
       request_body["operator_email"] = operator_email
     if requested_handle is not None:
       request_body["requested_handle"] = requested_handle
+    if display_name is not None:
+      request_body["display_name"] = display_name
 
     return self._make_request("POST", "/api/v1/enroll/declared", json_body=request_body)
 
@@ -168,6 +172,7 @@ class OneIDAPIClient:
     hsm_type: str = "tpm",
     operator_email: str | None = None,
     requested_handle: str | None = None,
+    display_name: str | None = None,
   ) -> dict[str, Any]:
     """Begin TPM/HSM-based enrollment (sovereign/sovereign-portable tiers).
 
@@ -185,6 +190,7 @@ class OneIDAPIClient:
         hsm_type: Type of HSM ('tpm', 'yubikey', 'nitrokey', etc.).
         operator_email: Optional human operator contact email.
         requested_handle: Optional vanity handle to claim.
+        display_name: Optional friendly name for the agent.
 
     Returns:
         Server response containing enrollment_session_id, credential_blob,
@@ -209,6 +215,8 @@ class OneIDAPIClient:
       request_body["operator_email"] = operator_email
     if requested_handle is not None:
       request_body["requested_handle"] = requested_handle
+    if display_name is not None:
+      request_body["display_name"] = display_name
 
     return self._make_request("POST", "/api/v1/enroll/begin", json_body=request_body)
 
@@ -220,6 +228,7 @@ class OneIDAPIClient:
     hsm_type: str = "yubikey",
     operator_email: str | None = None,
     requested_handle: str | None = None,
+    display_name: str | None = None,
   ) -> dict[str, Any]:
     """Begin PIV-based enrollment (sovereign-portable tier).
 
@@ -235,6 +244,7 @@ class OneIDAPIClient:
         hsm_type: Type of PIV device ('yubikey').
         operator_email: Optional human operator contact email.
         requested_handle: Optional vanity handle to claim.
+        display_name: Optional friendly name for the agent.
 
     Returns:
         Server response containing enrollment_session_id, nonce_challenge,
@@ -256,6 +266,8 @@ class OneIDAPIClient:
       request_body["operator_email"] = operator_email
     if requested_handle is not None:
       request_body["requested_handle"] = requested_handle
+    if display_name is not None:
+      request_body["display_name"] = display_name
 
     return self._make_request("POST", "/api/v1/enroll/begin/piv", json_body=request_body)
 

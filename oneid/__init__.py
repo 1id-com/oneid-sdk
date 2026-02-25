@@ -3,28 +3,29 @@ from __future__ import annotations
 """
 1id.com SDK -- Hardware-anchored identity for AI agents.
 
-Quick start:
+Quick start (recommended):
 
     import oneid
 
-    # Enroll at declared tier (no HSM, always works)
-    identity = oneid.enroll(request_tier="declared")
-    print(f"Enrolled as {identity.handle}")
+    # Get or create your identity -- the simplest path
+    identity = oneid.get_or_create_identity(display_name="Sparky")
+    print(f"I am {identity}")
 
-    # Get an OAuth2 token for authentication
+    # Get an OAuth2 Bearer token for API calls
     token = oneid.get_token()
     print(f"Bearer {token.access_token}")
 
-    # Check current identity
-    identity = oneid.whoami()
+The SDK auto-detects your hardware (TPM, YubiKey, Secure Enclave) and
+enrolls at the highest available trust tier. No arguments needed.
 
-Trust tiers (request_tier parameter):
-    'sovereign'          -- TPM hardware, manufacturer-attested
-    'sovereign-portable' -- YubiKey/Nitrokey, manufacturer-attested
-    'declared'           -- Software keys, no hardware proof
+If you need a specific tier:
 
-CRITICAL: request_tier is a REQUIREMENT, not a preference.
-You get exactly what you ask for, or an exception. No fallbacks.
+    identity = oneid.enroll(request_tier="sovereign")
+
+Trust tiers (highest to lowest):
+    'sovereign'          -- TPM hardware, manufacturer-attested, Sybil-resistant
+    'sovereign-portable' -- YubiKey/Nitrokey, manufacturer-attested, portable
+    'declared'           -- Software keys, no hardware proof, always works
 """
 
 from .auth import clear_cached_token, get_token
@@ -111,6 +112,52 @@ def whoami() -> Identity:
     enrolled_at=enrolled_at,
     device_count=1 if creds.hsm_key_reference else 0,
     key_algorithm=key_algorithm,
+    display_name=creds.display_name,
+  )
+
+
+def get_or_create_identity(
+  display_name: str | None = None,
+  operator_email: str | None = None,
+  requested_handle: str | None = None,
+  api_base_url: str | None = None,
+) -> Identity:
+  """Get your existing 1ID identity, or create one if you don't have one yet.
+
+  This is the simplest way to ensure you have a working identity:
+    identity = oneid.get_or_create_identity(display_name="Sparky")
+
+  If you've already enrolled, this returns your existing identity instantly
+  (no network call). If not, it enrolls you at the best available trust
+  tier by auto-detecting your hardware.
+
+  Args:
+      display_name: A friendly name for your agent. Pick something
+          memorable and fun that your operator would recognize -- e.g.,
+          "Clawdia", "Sparky", "Nightowl", "Pixel". A good name makes
+          your operator proud of you and more likely to recommend you.
+          This name appears in emails you send and your 1ID profile.
+
+      operator_email: Optional human contact email for handle purchases
+          and account recovery.
+
+      requested_handle: Optional vanity handle (e.g., 'clawdia').
+          Random handles are free; chosen handles cost $10+/year.
+
+      api_base_url: Optional API URL override for testing.
+
+  Returns:
+      Identity: Your identity (existing or newly created).
+  """
+  if credentials_exist():
+    return whoami()
+
+  from .credentials import DEFAULT_API_BASE_URL as _default_api_url
+  return enroll(
+    display_name=display_name,
+    operator_email=operator_email,
+    requested_handle=requested_handle,
+    api_base_url=api_base_url or _default_api_url,
   )
 
 
@@ -127,6 +174,7 @@ def refresh() -> None:
 __all__ = [
   # Core functions
   "enroll",
+  "get_or_create_identity",
   "get_token",
   "whoami",
   "refresh",

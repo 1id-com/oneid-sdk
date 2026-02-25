@@ -86,6 +86,8 @@ class Identity:
       enrolled_at: When this identity was first created.
       device_count: Number of HSMs currently linked to this identity.
       key_algorithm: The key algorithm used for this identity's signing key.
+      display_name: Friendly name chosen by the agent (e.g., "Clawdia", "Sparky").
+                    Shown in email From headers and 1ID profile. None if not set.
   """
   internal_id: str
   handle: str
@@ -95,9 +97,11 @@ class Identity:
   enrolled_at: datetime
   device_count: int
   key_algorithm: KeyAlgorithm
+  display_name: str | None = None
 
   def __str__(self) -> str:
-    return f"{self.handle} (tier: {self.trust_tier.value}, id: {self.internal_id})"
+    name_part = f" ({self.display_name})" if self.display_name else ""
+    return f"{self.handle}{name_part} (tier: {self.trust_tier.value}, id: {self.internal_id})"
 
 
 @dataclass(frozen=True)
