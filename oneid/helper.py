@@ -37,6 +37,7 @@ from .exceptions import (
   BinaryNotFoundError,
   HSMAccessError,
   NoHSMError,
+  TPMSetupRequiredError,
   UACDeniedError,
 )
 
@@ -49,7 +50,7 @@ logger = logging.getLogger("oneid.helper")
 
 # -- Binary naming convention --
 BINARY_NAME_PREFIX = "oneid-enroll"
-BINARY_VERSION = "0.2.0"
+BINARY_VERSION = "0.3.0"
 
 # -- Download URLs --
 BINARY_DOWNLOAD_BASE_URL = "https://github.com/1id-com/oneid-enroll/releases/latest"
@@ -371,7 +372,9 @@ def _run_binary_command(
     error_code = output.get("error_code", "UNKNOWN")
     error_message = output.get("error", result.stderr.strip() or f"Exit code {result.returncode}")
 
-    if error_code == "NO_HSM_FOUND" or "no.*hsm" in error_message.lower() or "no.*tpm" in error_message.lower():
+    if error_code == "TBS_ACCESS_DENIED" or error_code == "TBS_ACCESS_NOT_CONFIGURED":
+      raise TPMSetupRequiredError(error_message)
+    elif error_code == "NO_HSM_FOUND" or "no.*hsm" in error_message.lower() or "no.*tpm" in error_message.lower():
       raise NoHSMError(error_message)
     elif error_code == "UAC_DENIED" or "denied" in error_message.lower():
       raise UACDeniedError(error_message)
@@ -425,7 +428,10 @@ def extract_attestation_data(hsm: dict) -> dict:
       - ak_handle: TPM handle reference for the AK
   """
   hsm_type = hsm.get("type", "tpm")
-  return _run_binary_command("extract", args=["--type", hsm_type, "--elevated"])
+  args = ["--type", hsm_type]
+  if hsm_type not in ("yubikey", "piv"):
+    args.append("--elevated")
+  return _run_binary_command("extract", args=args)
 
 
 def activate_credential(
@@ -751,6 +757,26 @@ class ElevatedSession:
     self._conn_socket = None
     self._server_socket = None
     self._process = None
+
+
+def setup_tbs_for_non_admin_tpm_access() -> dict:
+  """Run the one-time TBS access setup via the Go binary.
+
+  Calls 'oneid-enroll setup-tbs --elevated --json' which sets a Windows
+  registry key to allow non-admin users to access TPM Base Services.
+  Triggers a UAC prompt on Windows. No-op on other platforms.
+
+  Returns:
+      Dict with keys:
+        - ok: True if setup succeeded or was already done
+        - already_set: True if the registry key was already configured
+        - platform: 'not_windows' on non-Windows platforms
+
+  Raises:
+      UACDeniedError: If the user denied the UAC prompt.
+      HSMAccessError: If the registry key could not be set.
+  """
+  return _run_binary_command("setup-tbs", args=["--elevated"])
 
 
 def sign_challenge_with_piv(nonce_b64: str) -> dict:

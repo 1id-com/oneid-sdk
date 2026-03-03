@@ -27,15 +27,13 @@ from oneid.identity import (
 class TestTrustTierEnum:
   """Verify TrustTier enum matches the spec exactly."""
 
-  def test_all_six_tiers_exist(self):
-    assert len(TrustTier) == 6
+  def test_all_four_tiers_exist(self):
+    assert len(TrustTier) == 4
 
-  def test_tier_values_match_spec(self):
+  def test_tier_values_match_rfc(self):
     assert TrustTier.SOVEREIGN.value == "sovereign"
-    assert TrustTier.SOVEREIGN_PORTABLE.value == "sovereign-portable"
-    assert TrustTier.LEGACY.value == "legacy"
+    assert TrustTier.PORTABLE.value == "portable"
     assert TrustTier.VIRTUAL.value == "virtual"
-    assert TrustTier.ENCLAVE.value == "enclave"
     assert TrustTier.DECLARED.value == "declared"
 
   def test_tiers_are_strings(self):

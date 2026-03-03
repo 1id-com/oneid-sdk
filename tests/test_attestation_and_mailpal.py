@@ -48,7 +48,7 @@ class TestPrepareAttestation:
   @patch("oneid.attestation.get_token")
   @patch("oneid.attestation.load_credentials")
   @patch("oneid.attestation._fetch_contact_token")
-  @patch("oneid.attestation._fetch_sd_jwt_proof")
+  @patch("oneid.attestation._fetch_sd_jwt_proof_for_message")
   def test_returns_attestation_proof_with_all_artifacts(
     self,
     mock_fetch_sd_jwt,
@@ -75,7 +75,7 @@ class TestPrepareAttestation:
   @patch("oneid.attestation.get_token")
   @patch("oneid.attestation.load_credentials")
   @patch("oneid.attestation._fetch_contact_token")
-  @patch("oneid.attestation._fetch_sd_jwt_proof")
+  @patch("oneid.attestation._fetch_sd_jwt_proof_for_message")
   def test_accepts_pre_computed_content_digest(
     self,
     mock_fetch_sd_jwt,
@@ -101,7 +101,7 @@ class TestPrepareAttestation:
   @patch("oneid.attestation.get_token")
   @patch("oneid.attestation.load_credentials")
   @patch("oneid.attestation._fetch_contact_token")
-  @patch("oneid.attestation._fetch_sd_jwt_proof")
+  @patch("oneid.attestation._fetch_sd_jwt_proof_for_message")
   def test_skips_sd_jwt_when_disabled(
     self,
     mock_fetch_sd_jwt,
@@ -122,7 +122,7 @@ class TestPrepareAttestation:
   @patch("oneid.attestation.get_token")
   @patch("oneid.attestation.load_credentials")
   @patch("oneid.attestation._fetch_contact_token")
-  @patch("oneid.attestation._fetch_sd_jwt_proof")
+  @patch("oneid.attestation._fetch_sd_jwt_proof_for_message")
   def test_skips_contact_token_when_disabled(
     self,
     mock_fetch_sd_jwt,
@@ -149,15 +149,18 @@ class TestMailpalSend:
   """Test oneid.mailpal.send() convenience wrapper."""
 
   @patch("oneid.mailpal.get_token")
+  @patch("oneid.mailpal.load_credentials")
   @patch("oneid.mailpal.prepare_attestation")
   @patch("oneid.mailpal.httpx.Client")
   def test_sends_email_with_attestation_headers(
     self,
     mock_httpx_client_class,
     mock_prepare,
+    mock_load_creds,
     mock_get_token,
   ):
     mock_get_token.return_value = _mock_token()
+    mock_load_creds.return_value = _mock_credentials()
 
     mock_proof = MagicMock()
     mock_proof.sd_jwt = "signed.sd.jwt"
@@ -194,13 +197,16 @@ class TestMailpalSend:
     assert sent_json["custom_headers"]["X-1ID-Contact-Token"] == "a1b2c3d4"
 
   @patch("oneid.mailpal.get_token")
+  @patch("oneid.mailpal.load_credentials")
   @patch("oneid.mailpal.httpx.Client")
   def test_sends_email_without_attestation(
     self,
     mock_httpx_client_class,
+    mock_load_creds,
     mock_get_token,
   ):
     mock_get_token.return_value = _mock_token()
+    mock_load_creds.return_value = _mock_credentials()
 
     mock_response = MagicMock()
     mock_response.status_code = 200

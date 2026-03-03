@@ -54,7 +54,7 @@ class NoHSMError(EnrollmentError):
   """Requested trust tier requires an HSM but none was found.
 
   This is raised when the caller requests a tier like 'sovereign' or
-  'sovereign-portable' but the machine has no TPM, YubiKey, or other
+  'portable' but the machine has no TPM, YubiKey, or other
   supported hardware security module.
 
   The caller's code should decide what to do: try a different tier,
@@ -88,6 +88,27 @@ class HSMAccessError(EnrollmentError):
 
   def __init__(self, message: str = "HSM found but access failed") -> None:
     super().__init__(message, error_code="HSM_ACCESS_ERROR")
+
+
+class TPMSetupRequiredError(EnrollmentError):
+  """TPM is present but TBS (TPM Base Services) access is not configured.
+
+  On Windows, non-admin users cannot access the TPM unless a one-time
+  registry key is set. This exception signals that the calling application
+  should:
+
+  1. Display a privacy warning (hardware-anchored identity implications)
+  2. Call oneid.setup_tbs() if the user consents
+  3. Call oneid.record_privacy_consent(mode="sd-jwt"|"direct")
+  4. Retry enrollment
+
+  This is distinct from NoHSMError (no TPM exists) and HSMAccessError
+  (TPM exists but is broken/locked). This error is fixable by running
+  the one-time setup-tbs command with administrator privileges.
+  """
+
+  def __init__(self, message: str = "TPM found but TBS access requires one-time setup") -> None:
+    super().__init__(message, error_code="TBS_ACCESS_DENIED")
 
 
 class AlreadyEnrolledError(EnrollmentError):

@@ -1,10 +1,12 @@
 """
 Enrollment logic for the 1id.com SDK.
 
-Orchestrates the enrollment flow for all trust tiers:
-- Declared: Pure software, generates a keypair, sends public key to server.
+Orchestrates the enrollment flow for all trust tiers
+(RFC: draft-drake-email-hardware-attestation-00 Section 3):
+- Declared:  Pure software, generates a keypair, sends public key to server.
 - Sovereign: Spawns Go binary for TPM operations, two-phase enrollment.
-- Sovereign-portable: Spawns Go binary for YubiKey/PIV operations.
+- Portable:  Spawns Go binary for YubiKey/PIV operations.
+- Virtual:   Spawns Go binary for vTPM operations.
 
 CRITICAL DESIGN RULE: request_tier is a REQUIREMENT, not a preference.
 The agent gets exactly the tier it requests, or an exception.
@@ -42,17 +44,14 @@ logger = logging.getLogger("oneid.enroll")
 # -- Tiers that require an HSM and the Go binary --
 TIERS_REQUIRING_HSM = frozenset({
   TrustTier.SOVEREIGN,
-  TrustTier.SOVEREIGN_PORTABLE,
-  TrustTier.LEGACY,
+  TrustTier.PORTABLE,
   TrustTier.VIRTUAL,
-  TrustTier.ENCLAVE,
 })
 
 
 _AUTO_DETECT_TIER_PREFERENCE_ORDER = [
   TrustTier.SOVEREIGN,
-  TrustTier.SOVEREIGN_PORTABLE,
-  TrustTier.ENCLAVE,
+  TrustTier.PORTABLE,
   TrustTier.VIRTUAL,
   TrustTier.DECLARED,
 ]
@@ -85,13 +84,11 @@ def enroll(
           the SDK auto-detects the best available hardware and enrolls at
           the highest tier your machine supports (falling back to declared).
           If specified, you get exactly that tier or an exception.
-          Valid values:
-          'sovereign'          -- requires TPM (discrete or firmware)
-          'sovereign-portable' -- requires YubiKey/Nitrokey/Feitian
-          'declared'           -- no hardware required (software keys)
-          'legacy'             -- requires TPM/HSM with expired cert
-          'virtual'            -- requires virtual TPM (VMware/Hyper-V)
-          'enclave'            -- requires Apple Secure Enclave
+          Valid values (RFC Section 3):
+          'sovereign' -- requires discrete/firmware TPM
+          'portable'  -- requires YubiKey/Nitrokey/Feitian PIV device
+          'virtual'   -- requires virtual TPM (VMware/Hyper-V/QEMU)
+          'declared'  -- no hardware required (software keys)
 
       display_name: Optional. A friendly name for your agent. Pick
           something memorable, fun, or whimsical that your operator would
@@ -199,7 +196,7 @@ def _enroll_at_specific_tier(
       key_algorithm=key_algorithm,
       api_base_url=api_base_url,
     )
-  elif tier == TrustTier.SOVEREIGN_PORTABLE:
+  elif tier == TrustTier.PORTABLE:
     return _enroll_piv_tier(
       request_tier=tier,
       operator_email=operator_email,
@@ -228,9 +225,9 @@ def _enroll_with_auto_detected_best_tier(
 ) -> Identity:
   """Auto-detect the best hardware and enroll at the highest possible tier.
 
-  Tries each tier in preference order (sovereign > sovereign-portable >
-  enclave > virtual > declared). The first one that succeeds wins. Declared
-  tier is always available as the final fallback.
+  Tries each tier in preference order (sovereign > portable > virtual >
+  declared). The first one that succeeds wins. Declared tier is always
+  available as the final fallback.
   """
   resolved_key_algorithm = DEFAULT_KEY_ALGORITHM
   if key_algorithm is not None:
@@ -320,7 +317,8 @@ def _enroll_declared_tier(
   identity_data = server_response.get("identity", {})
   credentials_data = server_response.get("credentials", {})
 
-  internal_id = identity_data.get("internal_id", "")
+  internal_id = identity_data.get("agent_id", identity_data.get("internal_id", ""))
+  agent_identity_urn = identity_data.get("agent_identity_urn", "")
   handle = identity_data.get("handle", f"@{internal_id[:12]}")
   enrolled_at_str = identity_data.get("registered_at", datetime.now(timezone.utc).isoformat())
 
@@ -335,6 +333,7 @@ def _enroll_declared_tier(
     private_key_pem=private_key_pem,
     enrolled_at=enrolled_at_str,
     display_name=display_name,
+    agent_identity_urn=agent_identity_urn or None,
   )
   credentials_file_path = save_credentials(stored_credentials)
   logger.info("Credentials saved to %s", credentials_file_path)
@@ -366,6 +365,7 @@ def _enroll_declared_tier(
     enrolled_at=enrolled_at,
     device_count=0,
     key_algorithm=key_algorithm,
+    agent_identity_urn=agent_identity_urn or None,
     display_name=display_name,
   )
 
@@ -377,7 +377,7 @@ def _enroll_piv_tier(
   display_name: str | None,
   api_base_url: str,
 ) -> Identity:
-  """Enroll at the sovereign-portable tier using a PIV device (YubiKey).
+  """Enroll at the portable tier using a PIV device (YubiKey/Nitrokey/Feitian).
 
   This uses the Go binary (oneid-enroll) to:
   1. Detect available HSMs and select a PIV device
@@ -390,7 +390,7 @@ def _enroll_piv_tier(
   8. Store credentials locally
 
   Args:
-      request_tier: The tier being requested (sovereign-portable).
+      request_tier: The tier being requested (portable).
       operator_email: Optional human contact email.
       requested_handle: Optional vanity handle.
       api_base_url: API base URL.
@@ -450,7 +450,8 @@ def _enroll_piv_tier(
   identity_data = activate_response.get("identity", {})
   credentials_data = activate_response.get("credentials", {})
 
-  internal_id = identity_data.get("internal_id", "")
+  internal_id = identity_data.get("agent_id", identity_data.get("internal_id", ""))
+  agent_identity_urn = identity_data.get("agent_identity_urn", "")
   handle = identity_data.get("handle", f"@{internal_id[:12]}")
   trust_tier_str = identity_data.get("trust_tier", request_tier.value)
   enrolled_at_str = identity_data.get("registered_at", datetime.now(timezone.utc).isoformat())
@@ -465,12 +466,13 @@ def _enroll_piv_tier(
     hsm_key_reference="piv-slot-9a",
     enrolled_at=enrolled_at_str,
     display_name=display_name,
+    agent_identity_urn=agent_identity_urn or None,
   )
   save_credentials(stored_credentials)
 
   # Check if agent requested a vanity handle and inform them about payment
-  if "requested_handle" in complete_response:
-    handle_info = complete_response["requested_handle"]
+  if "requested_handle" in activate_response:
+    handle_info = activate_response["requested_handle"]
     logger.info("Vanity handle requested: %s", handle_info.get("handle"))
     logger.info("Handle status: %s", handle_info.get("status"))
     if handle_info.get("status") == "available":
@@ -505,6 +507,7 @@ def _enroll_piv_tier(
     enrolled_at=enrolled_at,
     device_count=identity_data.get("device_count", 1),
     key_algorithm=KeyAlgorithm.ECDSA_P256,
+    agent_identity_urn=agent_identity_urn or None,
     display_name=display_name,
   )
 
@@ -516,13 +519,13 @@ def _enroll_hsm_tier(
   display_name: str | None,
   api_base_url: str,
 ) -> Identity:
-  """Enroll at an HSM-backed trust tier (sovereign, sovereign-portable, etc.).
+  """Enroll at an HSM-backed trust tier (sovereign or virtual).
 
   This uses the Go binary (oneid-enroll) to:
   1. Detect available HSMs
-  2. Extract attestation data (requires elevation)
+  2. Extract attestation data (may require setup-tbs first on Windows)
   3. Send attestation to server
-  4. Receive and decrypt credential activation challenge (requires elevation)
+  4. Receive and decrypt credential activation challenge
   5. Send decrypted challenge to server
   6. Receive identity + OAuth2 credentials
   7. Store credentials locally
@@ -606,7 +609,8 @@ def _enroll_hsm_tier(
   identity_data = activate_response.get("identity", {})
   credentials_data = activate_response.get("credentials", {})
 
-  internal_id = identity_data.get("internal_id", "")
+  internal_id = identity_data.get("agent_id", identity_data.get("internal_id", ""))
+  agent_identity_urn = identity_data.get("agent_identity_urn", "")
   handle = identity_data.get("handle", f"@{internal_id[:12]}")
   trust_tier_str = identity_data.get("trust_tier", request_tier.value)
   enrolled_at_str = identity_data.get("registered_at", datetime.now(timezone.utc).isoformat())
@@ -621,6 +625,7 @@ def _enroll_hsm_tier(
     hsm_key_reference=attestation_data.get("ak_handle"),
     enrolled_at=enrolled_at_str,
     display_name=display_name,
+    agent_identity_urn=agent_identity_urn or None,
   )
   save_credentials(stored_credentials)
 
@@ -661,6 +666,7 @@ def _enroll_hsm_tier(
     enrolled_at=enrolled_at,
     device_count=identity_data.get("device_count", 1),
     key_algorithm=KeyAlgorithm.RSA_2048,  # TPM AK is typically RSA-2048
+    agent_identity_urn=agent_identity_urn or None,
     display_name=display_name,
   )
 
@@ -680,10 +686,8 @@ def _select_hsm_for_tier(
   """
   tier_to_hsm_type_preferences: dict[TrustTier, list[str]] = {
     TrustTier.SOVEREIGN: ["tpm"],
-    TrustTier.SOVEREIGN_PORTABLE: ["yubikey", "nitrokey", "feitian", "solokeys"],
-    TrustTier.LEGACY: ["tpm", "yubikey", "nitrokey", "feitian"],
-    TrustTier.VIRTUAL: ["tpm"],  # VMware/Hyper-V vTPM
-    TrustTier.ENCLAVE: ["secure_enclave"],
+    TrustTier.PORTABLE: ["yubikey", "nitrokey", "feitian", "solokeys"],
+    TrustTier.VIRTUAL: ["tpm"],
   }
 
   preferred_types = tier_to_hsm_type_preferences.get(request_tier, [])

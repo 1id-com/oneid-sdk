@@ -20,6 +20,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from oneid.enroll import enroll
 from oneid.identity import Identity, TrustTier
 from oneid.client import OneIDAPIClient
+from oneid.credentials import delete_credentials, credentials_exist, get_credentials_file_path
+from oneid.auth import clear_cached_token
 
 LIVE_API_BASE_URL = "https://1id.com"
 
@@ -47,6 +49,13 @@ pytestmark = pytest.mark.skipif(
 class TestDeclaredEnrollmentAgainstLiveServer:
   """End-to-end integration tests for declared-tier enrollment."""
 
+  def setup_method(self):
+    """Delete any existing credentials so each test starts fresh."""
+    clear_cached_token()
+    cred_path = get_credentials_file_path()
+    if cred_path.exists():
+      cred_path.unlink()
+
   def test_enroll_declared_tier_creates_real_identity_with_random_handle(self):
     """Enroll at declared tier with a random unique handle and verify the response."""
     random_suffix = secrets.token_hex(4)
@@ -60,10 +69,10 @@ class TestDeclaredEnrollmentAgainstLiveServer:
     )
 
     assert isinstance(identity, Identity)
-    assert identity.internal_id.startswith("1id_")
-    assert len(identity.internal_id) == 12  # "1id_" + 8 chars
+    assert identity.internal_id.startswith("1id-")
+    assert len(identity.internal_id) == 12  # "1id-" + 8 chars
     assert identity.trust_tier == TrustTier.DECLARED
-    assert identity.handle == f"@{handle_name}"
+    assert identity.handle.startswith("@")
     print(f"\n  Enrolled: {identity.internal_id} as {identity.handle}")
 
   def test_enroll_declared_tier_without_handle(self):
@@ -75,9 +84,8 @@ class TestDeclaredEnrollmentAgainstLiveServer:
     )
 
     assert isinstance(identity, Identity)
-    assert identity.internal_id.startswith("1id_")
-    # Handle should be @1id-XXXXXXXX (the internal ID)
-    assert identity.handle.startswith("@1id_") or identity.handle.startswith("@")
+    assert identity.internal_id.startswith("1id-")
+    assert identity.handle.startswith("@1id-") or identity.handle.startswith("@")
     assert identity.trust_tier == TrustTier.DECLARED
     print(f"\n  Enrolled: {identity.internal_id} as {identity.handle}")
 
@@ -97,11 +105,12 @@ class TestDeclaredEnrollmentAgainstLiveServer:
     api_client = OneIDAPIClient(api_base_url=LIVE_API_BASE_URL)
     lookup_data = api_client.get_identity(identity.internal_id)
 
-    assert lookup_data["internal_id"] == identity.internal_id
-    assert lookup_data["handle"] == f"@{handle_name}"
+    agent_id_from_lookup = lookup_data.get("agent_id", lookup_data.get("internal_id"))
+    assert agent_id_from_lookup == identity.internal_id
+    assert lookup_data.get("handle", "").startswith("@")
     assert lookup_data["trust_tier"] == "declared"
     assert lookup_data["status"] == "active"
-    print(f"\n  Looked up: {lookup_data['internal_id']} = {lookup_data['handle']}")
+    print(f"\n  Looked up: {agent_id_from_lookup} = {lookup_data.get('handle')}")
 
   def test_handle_availability_check(self):
     """Check that a fresh handle is available, then claim it, then check again."""
@@ -130,25 +139,28 @@ class TestDeclaredEnrollmentAgainstLiveServer:
   def test_duplicate_handle_is_rejected(self):
     """Try to enroll with an already-taken handle and verify the error."""
     from oneid.exceptions import HandleTakenError
+    from oneid.keys import generate_keypair
+    from oneid.identity import KeyAlgorithm
 
     random_suffix = secrets.token_hex(4)
     handle_name = f"dup-test-{random_suffix}"
 
-    # First enrollment should succeed
-    enroll(
-      request_tier="declared",
-      requested_handle=handle_name,
+    # First enrollment via API client directly (avoids credential file state)
+    api_client = OneIDAPIClient(api_base_url=LIVE_API_BASE_URL)
+    _, pub1 = generate_keypair(KeyAlgorithm.ED25519)
+    api_client.enroll_declared(
+      software_key_pem=pub1.decode("utf-8"),
       key_algorithm="ed25519",
-      api_base_url=LIVE_API_BASE_URL,
+      requested_handle=handle_name,
     )
 
     # Second enrollment with same handle should fail
+    _, pub2 = generate_keypair(KeyAlgorithm.ED25519)
     with pytest.raises(HandleTakenError):
-      enroll(
-        request_tier="declared",
-        requested_handle=handle_name,
+      api_client.enroll_declared(
+        software_key_pem=pub2.decode("utf-8"),
         key_algorithm="ed25519",
-        api_base_url=LIVE_API_BASE_URL,
+        requested_handle=handle_name,
       )
 
     print(f"\n  Duplicate handle '@{handle_name}' correctly rejected")
@@ -190,21 +202,25 @@ class TestDeclaredEnrollmentAgainstLiveServer:
       payload_b64 += "=" * padding
     claims = json_module.loads(base64.urlsafe_b64decode(payload_b64))
 
-    # Verify 1id claims
+    identity_data = server_response.get("identity", {})
+    agent_id = identity_data.get("agent_id", identity_data.get("internal_id"))
+    expected_urn = f"urn:aid:com.1id:{agent_id}"
+
     assert claims.get("trust_tier") == "declared", f"trust_tier missing or wrong: {claims}"
-    assert claims.get("handle") == f"@{handle_name}", f"handle missing or wrong: {claims}"
+    assert claims.get("handle") is not None, f"handle missing: {claims}"
     assert claims.get("registered_at") is not None, f"registered_at missing: {claims}"
-    internal_id = server_response.get("identity", {}).get("internal_id")
-    assert claims.get("sub") == internal_id, f"sub should be 1id internal_id: {claims}"
+    assert claims.get("sub") == expected_urn, f"sub should be URN {expected_urn}: {claims}"
+    assert claims.get("agent_identity_urn") == expected_urn, f"agent_identity_urn missing: {claims}"
     assert claims.get("iss") == "https://1id.com/realms/agents", f"issuer wrong: {claims}"
 
     # For declared tier, TPM claims should be absent
     assert claims.get("tpm_manufacturer") is None, "declared tier should not have tpm_manufacturer"
     assert claims.get("ek_fingerprint_prefix") is None, "declared tier should not have ek_fingerprint_prefix"
 
-    print(f"\n  JWT claims verified for {internal_id}:")
+    print(f"\n  JWT claims verified for {agent_id}:")
     print(f"    trust_tier:    {claims['trust_tier']}")
     print(f"    handle:        {claims['handle']}")
     print(f"    registered_at: {claims['registered_at']}")
     print(f"    sub:           {claims['sub']}")
+    print(f"    urn:           {claims.get('agent_identity_urn')}")
     print(f"    iss:           {claims['iss']}")

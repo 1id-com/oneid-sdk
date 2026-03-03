@@ -30,7 +30,7 @@ logger = logging.getLogger("oneid.client")
 
 # -- HTTP client configuration --
 DEFAULT_HTTP_TIMEOUT_SECONDS = 30.0
-USER_AGENT = "oneid-sdk-python/0.2.0"
+from ._version import USER_AGENT
 
 
 class OneIDAPIClient:
@@ -174,7 +174,7 @@ class OneIDAPIClient:
     requested_handle: str | None = None,
     display_name: str | None = None,
   ) -> dict[str, Any]:
-    """Begin TPM/HSM-based enrollment (sovereign/sovereign-portable tiers).
+    """Begin TPM/HSM-based enrollment (sovereign/virtual tiers).
 
     This is the first step of the two-phase enrollment flow. The server
     validates the attestation chain and returns a credential activation
@@ -230,7 +230,7 @@ class OneIDAPIClient:
     requested_handle: str | None = None,
     display_name: str | None = None,
   ) -> dict[str, Any]:
-    """Begin PIV-based enrollment (sovereign-portable tier).
+    """Begin PIV-based enrollment (portable tier).
 
     This is the first step of the two-phase PIV enrollment flow. The server
     validates the attestation certificate chain against the Yubico Root CA,

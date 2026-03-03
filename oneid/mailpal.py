@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from ._version import USER_AGENT
 from .auth import get_token
 from .attestation import prepare_attestation, AttestationProof
 from .credentials import load_credentials
@@ -40,7 +41,6 @@ logger = logging.getLogger("oneid.mailpal")
 
 _MAILPAL_API_BASE_URL = "https://mailpal.com"
 _HTTP_TIMEOUT_SECONDS = 30.0
-_USER_AGENT = "oneid-sdk-python/0.2.0"
 
 
 @dataclass
@@ -93,7 +93,7 @@ def _get_auth_headers() -> Dict[str, str]:
   token = get_token()
   return {
     "Authorization": f"Bearer {token.access_token}",
-    "User-Agent": _USER_AGENT,
+    "User-Agent": USER_AGENT,
   }
 
 
@@ -346,7 +346,7 @@ def get_contact_token(
   token = get_token()
   auth_headers = {
     "Authorization": f"Bearer {token.access_token}",
-    "User-Agent": _USER_AGENT,
+    "User-Agent": USER_AGENT,
   }
 
   contact_token_value, _ = _fetch_contact_token(api_base_url, auth_headers)

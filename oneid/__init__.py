@@ -22,10 +22,11 @@ If you need a specific tier:
 
     identity = oneid.enroll(request_tier="sovereign")
 
-Trust tiers (highest to lowest):
-    'sovereign'          -- TPM hardware, manufacturer-attested, Sybil-resistant
-    'sovereign-portable' -- YubiKey/Nitrokey, manufacturer-attested, portable
-    'declared'           -- Software keys, no hardware proof, always works
+Trust tiers (highest to lowest, RFC Section 3):
+    'sovereign' -- Discrete/firmware TPM, manufacturer CA chain, Sybil-resistant
+    'portable'  -- YubiKey/Nitrokey/Feitian PIV, manufacturer-attested, portable
+    'virtual'   -- Hypervisor vTPM (VMware/Hyper-V/QEMU), hypervisor-attested
+    'declared'  -- Software keys, no hardware proof, always works
 """
 
 from .auth import clear_cached_token, get_token
@@ -44,6 +45,7 @@ from .exceptions import (
   NoHSMError,
   NotEnrolledError,
   OneIDError,
+  TPMSetupRequiredError,
   UACDeniedError,
 )
 from .identity import (
@@ -112,6 +114,7 @@ def whoami() -> Identity:
     enrolled_at=enrolled_at,
     device_count=1 if creds.hsm_key_reference else 0,
     key_algorithm=key_algorithm,
+    agent_identity_urn=creds.agent_identity_urn,
     display_name=creds.display_name,
   )
 
@@ -170,6 +173,59 @@ def refresh() -> None:
   clear_cached_token()
 
 
+def setup_tbs() -> bool:
+  """One-time setup: grant TBS access to non-admin users (Windows only).
+
+  This sets a Windows registry key so that all future TPM operations
+  (extract, activate, sign) work without administrator privileges.
+  Triggers a UAC prompt on Windows. No-op on other platforms.
+
+  Call this when you catch TPMSetupRequiredError during enrollment.
+
+  Returns:
+      True if setup succeeded (or was already done).
+
+  Raises:
+      UACDeniedError: If the user denied the UAC prompt.
+      HSMAccessError: If the registry key could not be set.
+  """
+  from .helper import setup_tbs_for_non_admin_tpm_access
+  result = setup_tbs_for_non_admin_tpm_access()
+  return result.get("ok", False)
+
+
+def record_privacy_consent(mode: str = "sd-jwt") -> None:
+  """Record the user's privacy consent choice in the credentials file.
+
+  After the calling application shows a privacy warning and the user
+  consents, call this to persist their preferred attestation mode.
+  Valid modes are 'sd-jwt' (selective disclosure, recommended) and
+  'direct' (full direct attestation).
+
+  Args:
+      mode: The user's chosen attestation mode ('sd-jwt' or 'direct').
+
+  Raises:
+      NotEnrolledError: If no credentials file exists yet.
+      ValueError: If mode is not 'sd-jwt' or 'direct'.
+  """
+  from datetime import datetime, timezone
+  from .credentials import load_credentials, save_credentials
+
+  if mode not in ("sd-jwt", "direct"):
+    raise ValueError(f"Invalid attestation mode '{mode}'. Must be 'sd-jwt' or 'direct'.")
+
+  creds = load_credentials()
+  creds = type(creds)(
+    **{
+      **{field: getattr(creds, field) for field in creds.__dataclass_fields__},
+      "privacy_consent_given_at": datetime.now(timezone.utc).isoformat(),
+      "default_attestation_mode": mode,
+    }
+  )
+  save_credentials(creds)
+
+
 # -- Public API --
 __all__ = [
   # Core functions
@@ -178,6 +234,8 @@ __all__ = [
   "get_token",
   "whoami",
   "refresh",
+  "setup_tbs",
+  "record_privacy_consent",
   "credentials_exist",
   "sign_challenge_with_private_key",
   "prepare_attestation",
@@ -196,6 +254,7 @@ __all__ = [
   "NoHSMError",
   "UACDeniedError",
   "HSMAccessError",
+  "TPMSetupRequiredError",
   "AlreadyEnrolledError",
   "HandleTakenError",
   "HandleInvalidError",

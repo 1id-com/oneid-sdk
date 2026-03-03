@@ -16,19 +16,17 @@ from enum import Enum
 class TrustTier(str, Enum):
   """Trust tiers assigned by 1id.com based on hardware attestation.
 
+  RFC: draft-drake-email-hardware-attestation-00 Section 3.
+
   Ordered from highest to lowest Sybil resistance:
-  - sovereign: Non-portable hardware (TPM), manufacturer-attested, current cert
-  - sovereign_portable: Portable hardware (YubiKey/Nitrokey), manufacturer-attested
-  - legacy: Was sovereign/sovereign-portable, but manufacturer cert expired
-  - virtual: Virtual TPM (VMware/Hyper-V), hypervisor-attested
-  - enclave: Apple Secure Enclave, TOFU (no attestation PKI)
-  - declared: Software-only, no hardware proof, self-asserted
+  - sovereign (TPM): Non-portable discrete/firmware TPM, manufacturer CA chain verifiable
+  - portable  (PIV): Portable PIV device (YubiKey/Nitrokey/Feitian), manufacturer-attested
+  - virtual   (VRT): Hypervisor vTPM (VMware/Hyper-V/QEMU), hypervisor-attested
+  - declared  (SFT): Software-only, no hardware proof, works everywhere
   """
   SOVEREIGN = "sovereign"
-  SOVEREIGN_PORTABLE = "sovereign-portable"
-  LEGACY = "legacy"
+  PORTABLE = "portable"
   VIRTUAL = "virtual"
-  ENCLAVE = "enclave"
   DECLARED = "declared"
 
 
@@ -74,11 +72,14 @@ class Identity:
 
   Attributes:
       internal_id: Permanent unique identifier (e.g., '1id-a7b3c9d2').
-                   This is the 'sub' claim in JWTs, the database primary key.
-                   Format: '1id_' prefix + 8 characters of base36 (a-z, 0-9).
+                   Lowercase base36 with '1id-' prefix.
                    NEVER changes, NEVER reused even after revocation.
+      agent_identity_urn: Full Agent Identity URN (RFC Section 4.1), e.g.,
+                          'urn:aid:1id.com:1id-a3b7k9m2'. This is the 'sub'
+                          claim in JWTs. None for identities created before
+                          the RFC upgrade.
       handle: Display name (e.g., '@clawdia' or '@1id-a7b3c9d2').
-              If no vanity handle is registered, this is '@' + first 8 chars of internal_id.
+              If no vanity handle is registered, this is '@' + internal_id.
               Vanity handles are display-only; internal_id is the real identity.
       trust_tier: The trust level assigned based on hardware attestation.
       hsm_type: Type of HSM used for enrollment, or None for declared tier.
@@ -97,11 +98,13 @@ class Identity:
   enrolled_at: datetime
   device_count: int
   key_algorithm: KeyAlgorithm
+  agent_identity_urn: str | None = None
   display_name: str | None = None
 
   def __str__(self) -> str:
     name_part = f" ({self.display_name})" if self.display_name else ""
-    return f"{self.handle}{name_part} (tier: {self.trust_tier.value}, id: {self.internal_id})"
+    urn_part = f", urn: {self.agent_identity_urn}" if self.agent_identity_urn else ""
+    return f"{self.handle}{name_part} (tier: {self.trust_tier.value}, id: {self.internal_id}{urn_part})"
 
 
 @dataclass(frozen=True)

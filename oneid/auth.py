@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
+from ._version import USER_AGENT
 from .credentials import StoredCredentials, load_credentials
 from .exceptions import AuthenticationError, NetworkError, NotEnrolledError
 from .identity import Token
@@ -130,7 +131,7 @@ def _request_token_from_keycloak(credentials: StoredCredentials) -> Token:
         data=request_body,
         headers={
           "Content-Type": "application/x-www-form-urlencoded",
-          "User-Agent": "oneid-sdk-python/0.1.0",
+          "User-Agent": USER_AGENT,
         },
       )
   except httpx.ConnectError as connection_error:
@@ -253,7 +254,7 @@ def authenticate_with_tpm(
       challenge_response = http_client.post(
         challenge_url,
         json={"identity_id": identity_id},
-        headers={"User-Agent": "oneid-sdk-python/0.1.0"},
+        headers={"User-Agent": USER_AGENT},
       )
   except httpx.ConnectError as connection_error:
     raise NetworkError(
@@ -303,7 +304,7 @@ def authenticate_with_tpm(
           "challenge_id": challenge_id,
           "signature_b64": signature_b64,
         },
-        headers={"User-Agent": "oneid-sdk-python/0.1.0"},
+        headers={"User-Agent": USER_AGENT},
       )
   except httpx.ConnectError as connection_error:
     raise NetworkError(

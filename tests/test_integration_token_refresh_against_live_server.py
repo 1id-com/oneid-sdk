@@ -63,7 +63,7 @@ class TestTokenRefreshAgainstLiveServer:
     assert token.access_token is not None
     assert len(token.access_token) > 50  # JWTs are long
     assert token.token_type == "Bearer"
-    assert token.expires_in > 0
+    assert token.expires_at is not None
     assert token.this_token_has_not_yet_expired is True
 
   def test_token_contains_correct_claims(self):
@@ -112,11 +112,13 @@ class TestTokenRefreshAgainstLiveServer:
     token = get_token()
     claims = _decode_jwt_payload_without_verification(token.access_token)
 
-    # The client_id should appear somewhere in the token claims
+    expected_urn = f"urn:aid:com.1id:{creds.client_id}"
     client_id_found_in_token = (
       claims.get("azp") == creds.client_id
       or claims.get("clientId") == creds.client_id
+      or claims.get("client_id") == creds.client_id
       or claims.get("sub") == creds.client_id
+      or claims.get("sub") == expected_urn
     )
     assert client_id_found_in_token, (
       f"Expected client_id '{creds.client_id}' in token claims, "

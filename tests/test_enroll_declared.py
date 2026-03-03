@@ -201,10 +201,10 @@ class TestNoFallbackRule:
       from oneid.credentials import credentials_exist
       assert not credentials_exist()
 
-  def test_sovereign_portable_never_falls_back_to_declared(self, isolated_credentials_directory):
-    """If sovereign-portable fails, no fallback."""
-    with patch("oneid.enroll._enroll_hsm_tier") as mock_hsm:
-      mock_hsm.side_effect = NoHSMError("No YubiKey")
+  def test_portable_never_falls_back_to_declared(self, isolated_credentials_directory):
+    """If portable tier fails, no fallback."""
+    with patch("oneid.enroll._enroll_piv_tier") as mock_piv:
+      mock_piv.side_effect = NoHSMError("No YubiKey")
 
       with pytest.raises(NoHSMError):
-        enroll(request_tier="sovereign-portable")
+        enroll(request_tier="portable")
