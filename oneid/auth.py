@@ -1,14 +1,14 @@
 """
 OAuth2 token management for the 1id.com SDK.
 
-After enrollment, agents authenticate using standard OAuth2
-client_credentials grant. No TPM operations needed for daily use.
+After enrollment, agents authenticate via hardware challenge-response
+(TPM for sovereign/virtual, PIV for portable) or OAuth2 client_credentials
+grant (declared tier only).
 
-This module handles:
-- Token acquisition (client_credentials grant)
-- Token caching (in-memory, with expiry awareness)
-- Token refresh
-- Authorization header formatting
+SECURITY RULE: Hardware-tier identities NEVER fall back to bare
+client_credentials. If the hardware device is absent, get_token() raises
+HardwareDeviceNotPresentError. This is intentional: a stolen
+credentials.json is useless without the physical device.
 
 The token endpoint is Keycloak:
   POST https://1id.com/realms/agents/protocol/openid-connect/token
@@ -24,14 +24,23 @@ import httpx
 
 from ._version import USER_AGENT
 from .credentials import StoredCredentials, load_credentials
-from .exceptions import AuthenticationError, NetworkError, NotEnrolledError
+from .exceptions import (
+  AuthenticationError,
+  HardwareDeviceNotPresentError,
+  NetworkError,
+  NotEnrolledError,
+)
 from .identity import Token
 
 logger = logging.getLogger("oneid.auth")
 
 # -- Configuration --
-TOKEN_REFRESH_MARGIN_SECONDS = 60  # Refresh tokens this many seconds before expiry
+TOKEN_REFRESH_MARGIN_SECONDS = 60
 TOKEN_REQUEST_TIMEOUT_SECONDS = 15.0
+
+_TIERS_REQUIRING_HARDWARE_AUTH = frozenset({"sovereign", "portable", "virtual"})
+_TIERS_USING_TPM = frozenset({"sovereign", "virtual"})
+_TIERS_USING_PIV = frozenset({"portable"})
 
 # -- Module-level token cache --
 _cached_token: Token | None = None
@@ -43,12 +52,12 @@ def get_token(
 ) -> Token:
   """Get a valid OAuth2 access token, refreshing if needed.
 
-  This is the primary authentication method for daily use.
+  For hardware-backed tiers (sovereign, portable, virtual), this invokes
+  the hardware challenge-response flow via the Go binary. The physical
+  device must be present. If it is absent, HardwareDeviceNotPresentError
+  is raised -- there is NO fallback to bare client_credentials.
 
-  For sovereign and virtual tier agents with a TPM, this automatically
-  uses TPM challenge-response authentication (no passwords transmitted).
-  For all other tiers, it uses the standard OAuth2 client_credentials
-  grant. If TPM auth fails, it falls back to client_credentials.
+  For declared tier, the standard OAuth2 client_credentials grant is used.
 
   Tokens are cached in memory and automatically refreshed when they
   are within TOKEN_REFRESH_MARGIN_SECONDS of expiry.
@@ -64,43 +73,66 @@ def get_token(
 
   Raises:
       NotEnrolledError: If no credentials file exists.
+      HardwareDeviceNotPresentError: If a hardware tier and device is absent.
       AuthenticationError: If the token request fails.
       NetworkError: If the token endpoint cannot be reached.
   """
   global _cached_token
 
-  # Check if cached token is still valid (with margin)
   if not force_refresh and _cached_token is not None:
     margin = timedelta(seconds=TOKEN_REFRESH_MARGIN_SECONDS)
     if datetime.now(timezone.utc) + margin < _cached_token.expires_at:
       return _cached_token
 
-  # Load credentials
   if credentials is None:
     credentials = load_credentials()
 
-  _TIERS_SUPPORTING_TPM_AUTH = ("sovereign", "virtual")
-  this_agent_has_tpm_key = (
-    credentials.trust_tier in _TIERS_SUPPORTING_TPM_AUTH
-    and credentials.hsm_key_reference is not None
-  )
-
-  if this_agent_has_tpm_key:
-    try:
-      logger.debug("Attempting TPM-based passwordless authentication...")
-      token = authenticate_with_tpm(credentials=credentials)
-      _cached_token = token
-      return token
-    except Exception as tpm_auth_error:
-      logger.info(
-        "TPM auth failed (%s), falling back to client_credentials grant",
-        tpm_auth_error,
-      )
+  if credentials.trust_tier in _TIERS_REQUIRING_HARDWARE_AUTH:
+    token = _authenticate_with_hardware_challenge_response(credentials)
+    _cached_token = token
+    return token
 
   token = _request_token_from_keycloak(credentials)
   _cached_token = token
-
   return token
+
+
+def _authenticate_with_hardware_challenge_response(credentials: StoredCredentials) -> Token:
+  """Route to TPM or PIV challenge-response based on trust tier.
+
+  Raises HardwareDeviceNotPresentError on any hardware failure -- never
+  falls back to client_credentials.
+  """
+  if credentials.trust_tier in _TIERS_USING_TPM:
+    try:
+      logger.debug("Attempting TPM-based passwordless authentication...")
+      return authenticate_with_tpm(credentials=credentials)
+    except HardwareDeviceNotPresentError:
+      raise
+    except Exception as tpm_error:
+      raise HardwareDeviceNotPresentError(
+        f"TPM authentication failed and hardware is required for "
+        f"{credentials.trust_tier} tier. Device may be absent or "
+        f"inaccessible: {tpm_error}"
+      ) from tpm_error
+
+  if credentials.trust_tier in _TIERS_USING_PIV:
+    try:
+      logger.debug("Attempting PIV-based passwordless authentication...")
+      return authenticate_with_piv(credentials=credentials)
+    except HardwareDeviceNotPresentError:
+      raise
+    except Exception as piv_error:
+      raise HardwareDeviceNotPresentError(
+        f"PIV authentication failed and hardware is required for "
+        f"{credentials.trust_tier} tier. YubiKey may be absent or "
+        f"inaccessible: {piv_error}"
+      ) from piv_error
+
+  raise HardwareDeviceNotPresentError(
+    f"Trust tier '{credentials.trust_tier}' requires hardware but no "
+    f"supported authentication method is available."
+  )
 
 
 def _request_token_from_keycloak(credentials: StoredCredentials) -> Token:
@@ -236,12 +268,7 @@ def authenticate_with_tpm(
     identity_id = credentials.client_id  # client_id IS the identity ID
 
   if ak_handle is None:
-    ak_handle = credentials.hsm_key_reference
-    if not ak_handle:
-      raise AuthenticationError(
-        "No AK handle found in credentials. TPM authentication requires "
-        "a sovereign or virtual tier enrollment with a TPM."
-      )
+    ak_handle = credentials.hsm_key_reference or ""
 
   if api_base_url is None:
     api_base_url = credentials.api_base_url
@@ -348,5 +375,145 @@ def authenticate_with_tpm(
   else:
     raise AuthenticationError(
       "TPM signature verified but no tokens were issued. "
+      "The Keycloak token endpoint may be unavailable."
+    )
+
+
+# ---------------------------------------------------------------------------
+# PIV-backed passwordless authentication (portable tier)
+# ---------------------------------------------------------------------------
+
+def authenticate_with_piv(
+  identity_id: str | None = None,
+  api_base_url: str | None = None,
+  credentials: StoredCredentials | None = None,
+) -> Token:
+  """Authenticate using a PIV device (YubiKey) -- passwordless sign-in.
+
+  Same challenge-response flow as TPM but uses PIV slot 9a ECDSA signing.
+  No PIN, no elevation, no human interaction required.
+
+  Args:
+      identity_id: The 1id internal ID. If None, loaded from credentials.
+      api_base_url: Base URL for the 1id API. If None, loaded from credentials.
+      credentials: Pre-loaded credentials. If None, loaded from file.
+
+  Returns:
+      A valid Token object.
+
+  Raises:
+      NotEnrolledError: If no credentials file exists.
+      AuthenticationError: If the challenge-response fails.
+      NetworkError: If the server cannot be reached.
+  """
+  global _cached_token
+
+  if credentials is None:
+    credentials = load_credentials()
+
+  if identity_id is None:
+    identity_id = credentials.client_id
+
+  if api_base_url is None:
+    api_base_url = credentials.api_base_url
+
+  challenge_url = f"{api_base_url}/api/v1/auth/challenge"
+
+  try:
+    with httpx.Client(timeout=TOKEN_REQUEST_TIMEOUT_SECONDS) as http_client:
+      challenge_response = http_client.post(
+        challenge_url,
+        json={"identity_id": identity_id},
+        headers={"User-Agent": USER_AGENT},
+      )
+  except httpx.ConnectError as connection_error:
+    raise NetworkError(
+      f"Could not connect to {challenge_url}: {connection_error}"
+    ) from connection_error
+  except httpx.TimeoutException as timeout_error:
+    raise NetworkError(
+      f"Challenge request to {challenge_url} timed out: {timeout_error}"
+    ) from timeout_error
+
+  if challenge_response.status_code != 200:
+    try:
+      error_body = challenge_response.json()
+      error_msg = error_body.get("error", {}).get("message", f"HTTP {challenge_response.status_code}")
+    except Exception:
+      error_msg = f"HTTP {challenge_response.status_code}"
+    raise AuthenticationError(f"Challenge request failed: {error_msg}")
+
+  challenge_data = challenge_response.json().get("data", {})
+  challenge_id = challenge_data.get("challenge_id")
+  nonce_b64 = challenge_data.get("nonce_b64")
+
+  if not challenge_id or not nonce_b64:
+    raise AuthenticationError("Server returned incomplete challenge response")
+
+  logger.debug("Received PIV auth challenge: %s", challenge_id)
+
+  from .helper import sign_challenge_with_piv
+
+  sign_result = sign_challenge_with_piv(nonce_b64=nonce_b64)
+  signature_b64 = sign_result.get("signature_b64", "")
+
+  if not signature_b64:
+    raise AuthenticationError("PIV signing returned empty signature")
+
+  logger.debug("PIV nonce signed successfully, verifying with server...")
+
+  verify_url = f"{api_base_url}/api/v1/auth/verify"
+
+  try:
+    with httpx.Client(timeout=TOKEN_REQUEST_TIMEOUT_SECONDS) as http_client:
+      verify_response = http_client.post(
+        verify_url,
+        json={
+          "challenge_id": challenge_id,
+          "signature_b64": signature_b64,
+        },
+        headers={"User-Agent": USER_AGENT},
+      )
+  except httpx.ConnectError as connection_error:
+    raise NetworkError(
+      f"Could not connect to {verify_url}: {connection_error}"
+    ) from connection_error
+  except httpx.TimeoutException as timeout_error:
+    raise NetworkError(
+      f"Verify request to {verify_url} timed out: {timeout_error}"
+    ) from timeout_error
+
+  if verify_response.status_code != 200:
+    try:
+      error_body = verify_response.json()
+      error_msg = error_body.get("error", {}).get("message", f"HTTP {verify_response.status_code}")
+    except Exception:
+      error_msg = f"HTTP {verify_response.status_code}"
+    raise AuthenticationError(f"PIV authentication failed: {error_msg}")
+
+  verify_data = verify_response.json().get("data", {})
+
+  if not verify_data.get("authenticated"):
+    raise AuthenticationError("Server did not confirm PIV authentication")
+
+  tokens = verify_data.get("tokens")
+  if tokens and tokens.get("access_token"):
+    expires_in_seconds = tokens.get("expires_in", 3600)
+    token = Token(
+      access_token=tokens["access_token"],
+      token_type=tokens.get("token_type", "Bearer"),
+      expires_at=datetime.now(timezone.utc) + timedelta(seconds=expires_in_seconds),
+      refresh_token=tokens.get("refresh_token"),
+    )
+    _cached_token = token
+    logger.info(
+      "PIV authentication successful for %s (handle: %s)",
+      identity_id,
+      verify_data.get("identity", {}).get("handle", "?"),
+    )
+    return token
+  else:
+    raise AuthenticationError(
+      "PIV signature verified but no tokens were issued. "
       "The Keycloak token endpoint may be unavailable."
     )

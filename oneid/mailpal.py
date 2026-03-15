@@ -212,7 +212,7 @@ def send(
     html_body: HTML body.
     from_address: Sender address. If None, MailPal uses the agent's primary address.
     include_attestation: Whether to include attestation headers (default True).
-    disclosed_claims: Which SD-JWT claims to disclose. Default: ["1id_trust_tier"].
+    disclosed_claims: Which SD-JWT claims to disclose. Default: ["trust_tier"].
     mailpal_api_url: Override the MailPal API URL.
     oneid_api_url: Override the 1id.com API URL.
 
@@ -245,7 +245,7 @@ def send(
   if proof:
     custom_headers = {}
     if proof.sd_jwt:
-      custom_headers["X-1ID-Proof"] = proof.sd_jwt
+      custom_headers["Hardware-Trust-Proof"] = proof.sd_jwt
     if proof.contact_token:
       custom_headers["X-1ID-Contact-Token"] = proof.contact_token
     if proof.content_digest:

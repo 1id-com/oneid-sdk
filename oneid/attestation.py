@@ -159,7 +159,10 @@ def _fetch_sd_jwt_proof_for_message(
   if response.status_code == 401:
     raise AuthenticationError("Bearer token rejected by SD-JWT endpoint.")
   if response.status_code != 200:
-    logger.warning("SD-JWT request failed (HTTP %d): %s", response.status_code, response.text[:200])
+    logger.error(
+      "SD-JWT request failed (HTTP %d): %s  -- Hardware-Trust-Proof header will be MISSING from this message",
+      response.status_code, response.text[:300],
+    )
     return None, {}
 
   data = response.json()

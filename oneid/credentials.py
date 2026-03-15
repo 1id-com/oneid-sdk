@@ -72,6 +72,7 @@ class StoredCredentials:
   agent_identity_urn: str | None = None
   privacy_consent_given_at: str | None = None
   default_attestation_mode: str | None = None
+  identity_certificate_chain_pem: str | None = None
 
 
 def get_credentials_directory() -> Path:

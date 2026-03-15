@@ -171,6 +171,23 @@ class AuthenticationError(OneIDError):
     super().__init__(message, error_code="AUTH_FAILED")
 
 
+class HardwareDeviceNotPresentError(AuthenticationError):
+  """Hardware device required for authentication but not detected or not responding.
+
+  Raised by get_token() when the identity's trust_tier is hardware-backed
+  (sovereign, portable, virtual) but the physical TPM or PIV device is
+  absent, inaccessible, or the challenge-response signing failed.
+
+  This is an intentional security property: credentials.json for a
+  hardware-tier identity is useless without the physical device.
+  get_token() never falls back to bare client_credentials for hardware tiers.
+  """
+
+  def __init__(self, message: str = "Hardware device required but not present or not responding") -> None:
+    super().__init__(message)
+    self.error_code = "HARDWARE_DEVICE_NOT_PRESENT"
+
+
 class NetworkError(OneIDError):
   """Could not reach the 1id.com API server.
 
@@ -220,6 +237,7 @@ class RateLimitExceededError(EnrollmentError):
 
 SERVER_ERROR_CODE_TO_EXCEPTION_CLASS: dict[str, type[OneIDError]] = {
   "EK_ALREADY_REGISTERED": AlreadyEnrolledError,
+  "PIV_DEVICE_ALREADY_REGISTERED": AlreadyEnrolledError,
   "EK_CERT_INVALID": EnrollmentError,
   "EK_CERT_CHAIN_UNTRUSTED": EnrollmentError,
   "HANDLE_TAKEN": HandleTakenError,
@@ -227,6 +245,15 @@ SERVER_ERROR_CODE_TO_EXCEPTION_CLASS: dict[str, type[OneIDError]] = {
   "HANDLE_RETIRED": HandleRetiredError,
   "RATE_LIMIT_EXCEEDED": RateLimitExceededError,
   "RATE_LIMITED": RateLimitExceededError,
+  "DOWNGRADE_REJECTED": EnrollmentError,
+  "COLOCATION_REQUIRED": EnrollmentError,
+  "LAST_DEVICE_BURN_REJECTED": EnrollmentError,
+  "DEVICE_ALREADY_BOUND": AlreadyEnrolledError,
+  "HARDWARE_LOCKED": EnrollmentError,
+  "ALREADY_LOCKED": EnrollmentError,
+  "DECLARED_TIER_CANNOT_LOCK": EnrollmentError,
+  "TOO_MANY_ACTIVE_DEVICES": EnrollmentError,
+  "HARDWARE_PROOF_REQUIRED": HardwareDeviceNotPresentError,
 }
 
 

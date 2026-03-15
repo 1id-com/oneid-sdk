@@ -127,14 +127,14 @@ def enroll(
   if credentials_exist():
     existing_credentials = load_credentials()
     raise AlreadyEnrolledError(
-      f"Good news -- you already have a 1ID identity! "
-      f"Your identity is '{existing_credentials.client_id}' "
+      f"You already have a 1ID identity: '{existing_credentials.client_id}' "
       f"(trust tier: {existing_credentials.trust_tier}). "
       f"Your identity is ready to use right now:\n"
-      f"  token = oneid.get_token()  # get a Bearer token for API calls\n"
-      f"  me = oneid.whoami()        # see your identity details\n"
-      f"If you need a NEW identity (this is rare and will abandon your "
-      f"current reputation), call oneid.credentials.delete_credentials() first."
+      f"  world = oneid.status()     # full picture: identity, services, guidance\n"
+      f"  token = oneid.get_token()  # Bearer token for API calls\n"
+      f"  me = oneid.get_or_create_identity(get_only=True)  # identity object\n"
+      f"Creating a second identity on the same machine is not supported. "
+      f"Use oneid.status() to see your current identity and connected services."
     )
 
   if request_tier is None:
@@ -334,6 +334,7 @@ def _enroll_declared_tier(
     enrolled_at=enrolled_at_str,
     display_name=display_name,
     agent_identity_urn=agent_identity_urn or None,
+    identity_certificate_chain_pem=server_response.get("identity_certificate_chain_pem"),
   )
   credentials_file_path = save_credentials(stored_credentials)
   logger.info("Credentials saved to %s", credentials_file_path)
@@ -428,24 +429,51 @@ def _enroll_piv_tier(
   attestation_data = extract_attestation_data(selected_hsm)
 
   api_client = OneIDAPIClient(api_base_url=api_base_url)
-  begin_response = api_client.enroll_begin_piv(
-    attestation_cert_pem=attestation_data["attestation_cert_pem"],
-    attestation_chain_pem=attestation_data.get("attestation_chain_pem", []),
-    signing_key_public_pem=attestation_data["signing_key_public_pem"],
-    hsm_type=selected_hsm.get("type", "yubikey"),
-    operator_email=operator_email,
-    requested_handle=requested_handle,
-  )
+  this_is_a_piv_recovery_not_a_new_enrollment = False
+
+  try:
+    begin_response = api_client.enroll_begin_piv(
+      attestation_cert_pem=attestation_data["attestation_cert_pem"],
+      attestation_chain_pem=attestation_data.get("attestation_chain_pem", []),
+      signing_key_public_pem=attestation_data["signing_key_public_pem"],
+      hsm_type=selected_hsm.get("type", "yubikey"),
+      operator_email=operator_email,
+      requested_handle=requested_handle,
+    )
+  except AlreadyEnrolledError:
+    logger.info(
+      "PIV device already registered -- attempting identity recovery. "
+      "The YubiKey IS the identity; re-presenting it recovers the identity."
+    )
+    begin_response = api_client.recover_begin_piv(
+      attestation_cert_pem=attestation_data["attestation_cert_pem"],
+      attestation_chain_pem=attestation_data.get("attestation_chain_pem", []),
+      signing_key_public_pem=attestation_data["signing_key_public_pem"],
+      hsm_type=selected_hsm.get("type", "yubikey"),
+    )
+    this_is_a_piv_recovery_not_a_new_enrollment = True
 
   nonce_challenge_b64 = begin_response["nonce_challenge"]
 
   sign_result = sign_challenge_with_piv(nonce_challenge_b64)
   signed_nonce_b64 = sign_result["signature_b64"]
 
-  activate_response = api_client.enroll_activate(
-    enrollment_session_id=begin_response["enrollment_session_id"],
-    decrypted_credential=signed_nonce_b64,
-  )
+  session_id_field = "recovery_session_id" if this_is_a_piv_recovery_not_a_new_enrollment else "enrollment_session_id"
+
+  if this_is_a_piv_recovery_not_a_new_enrollment:
+    activate_response = api_client.recover_activate(
+      recovery_session_id=begin_response[session_id_field],
+      decrypted_credential=signed_nonce_b64,
+    )
+    logger.info(
+      "Identity recovered via PIV: %s",
+      activate_response.get("identity", {}).get("agent_id", "unknown"),
+    )
+  else:
+    activate_response = api_client.enroll_activate(
+      enrollment_session_id=begin_response[session_id_field],
+      decrypted_credential=signed_nonce_b64,
+    )
 
   identity_data = activate_response.get("identity", {})
   credentials_data = activate_response.get("credentials", {})
@@ -467,6 +495,7 @@ def _enroll_piv_tier(
     enrolled_at=enrolled_at_str,
     display_name=display_name,
     agent_identity_urn=agent_identity_urn or None,
+    identity_certificate_chain_pem=activate_response.get("identity_certificate_chain_pem"),
   )
   save_credentials(stored_credentials)
 
@@ -577,33 +606,62 @@ def _enroll_hsm_tier(
   # Send EK cert + AK public key + AK TPMT_PUBLIC to the server.
   # Server runs MakeCredential and returns credential_blob + encrypted_secret.
   api_client = OneIDAPIClient(api_base_url=api_base_url)
-  begin_response = api_client.enroll_begin(
-    ek_certificate_pem=attestation_data["ek_cert_pem"],
-    ak_public_key_pem=attestation_data.get("ak_public_pem", ""),
-    ak_tpmt_public_b64=attestation_data.get("ak_tpmt_public_b64", ""),
-    ek_public_key_pem=attestation_data.get("ek_public_pem", ""),
-    ek_certificate_chain_pem=attestation_data.get("chain_pem", []),
-    hsm_type=selected_hsm.get("type", "tpm"),
-    operator_email=operator_email,
-    requested_handle=requested_handle,
-  )
+  this_is_a_recovery_not_a_new_enrollment = False
+
+  try:
+    begin_response = api_client.enroll_begin(
+      ek_certificate_pem=attestation_data["ek_cert_pem"],
+      ak_public_key_pem=attestation_data.get("ak_public_pem", ""),
+      ak_tpmt_public_b64=attestation_data.get("ak_tpmt_public_b64", ""),
+      ek_public_key_pem=attestation_data.get("ek_public_pem", ""),
+      ek_certificate_chain_pem=attestation_data.get("chain_pem", []),
+      hsm_type=selected_hsm.get("type", "tpm"),
+      operator_email=operator_email,
+      requested_handle=requested_handle,
+    )
+  except AlreadyEnrolledError:
+    logger.info(
+      "Hardware already registered -- attempting identity recovery. "
+      "The hardware IS the identity; a machine that forgot its credentials "
+      "can recover by proving it still has the same TPM."
+    )
+    begin_response = api_client.recover_begin(
+      ek_certificate_pem=attestation_data["ek_cert_pem"],
+      ak_public_key_pem=attestation_data.get("ak_public_pem", ""),
+      ak_tpmt_public_b64=attestation_data.get("ak_tpmt_public_b64", ""),
+      ek_public_key_pem=attestation_data.get("ek_public_pem", ""),
+      ek_certificate_chain_pem=attestation_data.get("chain_pem", []),
+    )
+    this_is_a_recovery_not_a_new_enrollment = True
 
   # Step 5: Activate credential via TPM (requires elevation).
   # The server returned credential_blob and encrypted_secret (from MakeCredential).
   # We pass these to the Go binary, which calls TPM2_ActivateCredential to decrypt.
   from .helper import activate_credential
+
+  session_id_field = "recovery_session_id" if this_is_a_recovery_not_a_new_enrollment else "enrollment_session_id"
   decrypted_credential = activate_credential(
     selected_hsm,
     credential_blob_b64=begin_response["credential_blob"],
     encrypted_secret_b64=begin_response["encrypted_secret"],
-    ak_handle=attestation_data.get("ak_handle", "0x81000100"),
+    ak_handle=attestation_data.get("ak_handle", ""),
   )
 
-  # Step 6: Complete enrollment with server
-  activate_response = api_client.enroll_activate(
-    enrollment_session_id=begin_response["enrollment_session_id"],
-    decrypted_credential=decrypted_credential,
-  )
+  # Step 6: Complete enrollment (or recovery) with server
+  if this_is_a_recovery_not_a_new_enrollment:
+    activate_response = api_client.recover_activate(
+      recovery_session_id=begin_response[session_id_field],
+      decrypted_credential=decrypted_credential,
+    )
+    logger.info(
+      "Identity recovered: %s (the hardware proved it is the same machine)",
+      activate_response.get("identity", {}).get("agent_id", "unknown"),
+    )
+  else:
+    activate_response = api_client.enroll_activate(
+      enrollment_session_id=begin_response[session_id_field],
+      decrypted_credential=decrypted_credential,
+    )
 
   # Step 7: Store credentials and return Identity
   identity_data = activate_response.get("identity", {})
@@ -626,6 +684,7 @@ def _enroll_hsm_tier(
     enrolled_at=enrolled_at_str,
     display_name=display_name,
     agent_identity_urn=agent_identity_urn or None,
+    identity_certificate_chain_pem=activate_response.get("identity_certificate_chain_pem"),
   )
   save_credentials(stored_credentials)
 
