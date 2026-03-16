@@ -70,8 +70,6 @@ class StoredCredentials:
   enrolled_at: str | None = None
   display_name: str | None = None
   agent_identity_urn: str | None = None
-  privacy_consent_given_at: str | None = None
-  default_attestation_mode: str | None = None
   identity_certificate_chain_pem: str | None = None
 
 
@@ -164,10 +162,6 @@ def save_credentials(credentials: StoredCredentials) -> Path:
     credentials_dict["display_name"] = credentials.display_name
   if credentials.agent_identity_urn is not None:
     credentials_dict["agent_identity_urn"] = credentials.agent_identity_urn
-  if credentials.privacy_consent_given_at is not None:
-    credentials_dict["privacy_consent_given_at"] = credentials.privacy_consent_given_at
-  if credentials.default_attestation_mode is not None:
-    credentials_dict["default_attestation_mode"] = credentials.default_attestation_mode
 
   credentials_file_path.write_text(
     json.dumps(credentials_dict, indent=2) + "\n",
@@ -219,8 +213,6 @@ def load_credentials() -> StoredCredentials:
     enrolled_at=credentials_dict.get("enrolled_at"),
     display_name=credentials_dict.get("display_name"),
     agent_identity_urn=credentials_dict.get("agent_identity_urn"),
-    privacy_consent_given_at=credentials_dict.get("privacy_consent_given_at"),
-    default_attestation_mode=credentials_dict.get("default_attestation_mode"),
   )
 
 

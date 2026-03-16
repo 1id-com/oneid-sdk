@@ -107,6 +107,54 @@ from .credential_pointers import (
 from ._version import __version__
 
 
+def _build_identity_from_local_credentials() -> Identity:
+  """Build an Identity object from the local credentials file.
+
+  Internal helper shared by whoami() and get_or_create_identity().
+  Does NOT emit any deprecation warnings. Does NOT make a network request.
+  """
+  from datetime import datetime, timezone
+
+  creds = load_credentials()
+
+  try:
+    trust_tier = TrustTier(creds.trust_tier)
+  except ValueError:
+    trust_tier = TrustTier.DECLARED
+
+  try:
+    key_algorithm = KeyAlgorithm(creds.key_algorithm)
+  except ValueError:
+    key_algorithm = DEFAULT_KEY_ALGORITHM
+
+  try:
+    enrolled_at = datetime.fromisoformat(creds.enrolled_at.replace("Z", "+00:00")) if creds.enrolled_at else datetime.now(timezone.utc)
+  except (ValueError, AttributeError):
+    enrolled_at = datetime.now(timezone.utc)
+
+  internal_id = creds.client_id
+  handle = f"@{internal_id}" if not internal_id.startswith("@") else internal_id
+
+  hsm_type: HSMType | None = None
+  if creds.private_key_pem is not None:
+    hsm_type = HSMType.SOFTWARE
+  elif creds.hsm_key_reference is not None:
+    hsm_type = HSMType.TPM
+
+  return Identity(
+    internal_id=internal_id,
+    handle=handle,
+    trust_tier=trust_tier,
+    hsm_type=hsm_type,
+    hsm_manufacturer=None,
+    enrolled_at=enrolled_at,
+    device_count=1 if creds.hsm_key_reference else 0,
+    key_algorithm=key_algorithm,
+    agent_identity_urn=creds.agent_identity_urn,
+    display_name=creds.display_name,
+  )
+
+
 def whoami() -> Identity:
   """Check the current enrolled identity.
 
@@ -131,47 +179,7 @@ def whoami() -> Identity:
     DeprecationWarning,
     stacklevel=2,
   )
-  from datetime import datetime, timezone
-
-  creds = load_credentials()
-
-  try:
-    trust_tier = TrustTier(creds.trust_tier)
-  except ValueError:
-    trust_tier = TrustTier.DECLARED
-
-  try:
-    key_algorithm = KeyAlgorithm(creds.key_algorithm)
-  except ValueError:
-    key_algorithm = DEFAULT_KEY_ALGORITHM
-
-  try:
-    enrolled_at = datetime.fromisoformat(creds.enrolled_at.replace("Z", "+00:00")) if creds.enrolled_at else datetime.now(timezone.utc)
-  except (ValueError, AttributeError):
-    enrolled_at = datetime.now(timezone.utc)
-
-  internal_id = creds.client_id
-  handle = f"@{internal_id}" if not internal_id.startswith("@") else internal_id
-
-  # Determine HSM type from credentials
-  hsm_type: HSMType | None = None
-  if creds.private_key_pem is not None:
-    hsm_type = HSMType.SOFTWARE
-  elif creds.hsm_key_reference is not None:
-    hsm_type = HSMType.TPM  # Could also be YubiKey, but we'd need more info
-
-  return Identity(
-    internal_id=internal_id,
-    handle=handle,
-    trust_tier=trust_tier,
-    hsm_type=hsm_type,
-    hsm_manufacturer=None,
-    enrolled_at=enrolled_at,
-    device_count=1 if creds.hsm_key_reference else 0,
-    key_algorithm=key_algorithm,
-    agent_identity_urn=creds.agent_identity_urn,
-    display_name=creds.display_name,
-  )
+  return _build_identity_from_local_credentials()
 
 
 def get_or_create_identity(
@@ -220,7 +228,7 @@ def get_or_create_identity(
       NotEnrolledError: If get_only=True and no credentials exist.
   """
   if credentials_exist():
-    return whoami()
+    return _build_identity_from_local_credentials()
 
   if get_only:
     raise NotEnrolledError(
@@ -295,38 +303,6 @@ def setup_tbs() -> bool:
   return result.get("ok", False)
 
 
-def record_privacy_consent(mode: str = "sd-jwt") -> None:
-  """Record the user's privacy consent choice in the credentials file.
-
-  After the calling application shows a privacy warning and the user
-  consents, call this to persist their preferred attestation mode.
-  Valid modes are 'sd-jwt' (selective disclosure, recommended) and
-  'direct' (full direct attestation).
-
-  Args:
-      mode: The user's chosen attestation mode ('sd-jwt' or 'direct').
-
-  Raises:
-      NotEnrolledError: If no credentials file exists yet.
-      ValueError: If mode is not 'sd-jwt' or 'direct'.
-  """
-  from datetime import datetime, timezone
-  from .credentials import load_credentials, save_credentials
-
-  if mode not in ("sd-jwt", "direct"):
-    raise ValueError(f"Invalid attestation mode '{mode}'. Must be 'sd-jwt' or 'direct'.")
-
-  creds = load_credentials()
-  creds = type(creds)(
-    **{
-      **{field: getattr(creds, field) for field in creds.__dataclass_fields__},
-      "privacy_consent_given_at": datetime.now(timezone.utc).isoformat(),
-      "default_attestation_mode": mode,
-    }
-  )
-  save_credentials(creds)
-
-
 # -- Public API --
 __all__ = [
   # Core functions
@@ -336,7 +312,6 @@ __all__ = [
   "get_token",
   "refresh",
   "setup_tbs",
-  "record_privacy_consent",
   "sign_challenge_with_private_key",
   "prepare_attestation",
   "AttestationProof",

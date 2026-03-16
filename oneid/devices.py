@@ -237,6 +237,7 @@ class BurnConfirmResult:
   confirmed_by_device_fingerprint: str
   confirmed_by_device_type: str
   remaining_active_devices: int
+  new_trust_tier: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -577,8 +578,6 @@ def _add_device_via_declared_to_hardware_upgrade(
       enrolled_at=credentials.enrolled_at,
       display_name=credentials.display_name,
       agent_identity_urn=credentials.agent_identity_urn,
-      privacy_consent_given_at=credentials.privacy_consent_given_at,
-      default_attestation_mode=credentials.default_attestation_mode,
     )
     save_credentials(updated_credentials)
     logger.info(
@@ -607,23 +606,27 @@ def _add_device_via_colocation_binding(
 ) -> DeviceAddResult:
   """Add a hardware device via the 042.3 co-location binding ceremony.
 
-  Full ceremony orchestration:
-    Phase 1: POST /piv-bind/begin -> get server nonce (N1)
-    Phase 2: Go binary sign --output-clock with N1 -> get C1 quote (S1 = signature)
-    Phase 3: Go binary piv-sign --data b64(S1||N1) -> get S2 signature
-    Phase 4: Go binary tpm-bind-quote --extend-data b64(SHA256(S2))
-             --qualifying-data b64(N1||S1||S2) --elevated -> get C2 quote
-    Phase 5: Go binary extract --type yubikey -> get PIV attestation
-    Phase 6: POST /piv-bind/complete with all collected data
+  Uses the single-process piv-bind-ceremony subcommand to keep all three
+  phases (TPM Quote, PIV sign, PCR Extend+Quote) within a single Go process
+  invocation, avoiding CreatePrimary overhead that would inflate the TPM
+  clock delta beyond the 365ms threshold.
 
-  Requires both devices to be physically present on this machine.
-  The entire ceremony must complete within 30 seconds.
+  Flow:
+    1. POST /piv-bind/begin -> get server nonce (N1) and session_id
+    2. oneid-enroll piv-bind-ceremony -> single process performs:
+       Phase 1: TPM2_Quote with N1 (captures C1 clock + S1 signature)
+       Phase 2: PIV sign SHA256(N1 || S1) (produces S2)
+       Phase 3: TPM2_PCR_Extend(16, SHA256(S2)) + Quote (captures C2 clock)
+    3. Extract full PIV attestation data for server-side device registration
+    4. POST /piv-bind/complete with proof bundle + attestation
+
+  Requires both TPM and YubiKey to be physically present on this machine.
+  The entire ceremony must complete within 30 seconds (server session TTL).
   """
   from .helper import (
     _run_binary_command,
     detect_available_hsms,
     extract_attestation_data,
-    sign_challenge_with_tpm,
   )
 
   logger.info(
@@ -631,9 +634,7 @@ def _add_device_via_colocation_binding(
     existing_device_type, existing_device_fingerprint[:16], new_device_type,
   )
 
-  ak_handle = credentials.hsm_key_reference or ""
-
-  # Phase 1: Begin session
+  # Step 1: Begin binding session with server
   session_data = _make_authenticated_request(
     "POST",
     "/api/v1/identity/piv-bind/begin",
@@ -646,75 +647,34 @@ def _add_device_via_colocation_binding(
   )
   session_id = session_data["session_id"]
   server_nonce_b64 = session_data["server_nonce_b64"]
-  server_nonce_bytes = base64.b64decode(server_nonce_b64)
 
   logger.info("Co-location session %s started (30s window)", session_id[:16])
 
-  # Phase 2: C1 TPM Quote (sign nonce with clock output)
-  c1_sign_args = ["--nonce", server_nonce_b64, "--output-clock"]
-  if ak_handle and ak_handle != "transient":
-    c1_sign_args.extend(["--ak-handle", ak_handle])
-  c1_result = _run_binary_command("sign", args=c1_sign_args)
-  c1_signature_b64 = c1_result.get("signature_b64", "")
-  c1_signature_bytes = base64.b64decode(c1_signature_b64)
-
-  c1_quote_data = {
-    "clock_ms": c1_result.get("clock_ms", 0),
-    "reset_count": c1_result.get("reset_count", 0),
-    "restart_count": c1_result.get("restart_count", 0),
-    "clock_safe": c1_result.get("clock_safe", True),
-    "signature_b64": c1_signature_b64,
-    "quoted_b64": c1_result.get("quoted_b64", ""),
-  }
-
-  logger.debug("C1 quote: clock=%dms, reset_count=%d", c1_quote_data["clock_ms"], c1_quote_data["reset_count"])
-
-  # Phase 3: S2 PIV signature over (S1 || N1)
-  s1_concat_n1 = c1_signature_bytes + server_nonce_bytes
-  s1_concat_n1_b64 = base64.b64encode(s1_concat_n1).decode("ascii")
-
-  s2_result = _run_binary_command(
-    "piv-sign",
-    args=["--data", s1_concat_n1_b64],
-  )
-  s2_signature_b64 = s2_result.get("signature_b64", "")
-  s2_signature_bytes = base64.b64decode(s2_signature_b64)
-
-  logger.debug("S2 PIV signature obtained")
-
-  # Phase 4: C2 TPM bind-quote (extend PCR 16 with SHA256(S2), then quote)
-  extend_hash = hashlib.sha256(s2_signature_bytes).digest()
-  extend_data_b64 = base64.b64encode(extend_hash).decode("ascii")
-
-  n1_s1_s2_concat = server_nonce_bytes + c1_signature_bytes + s2_signature_bytes
-  qualifying_data_b64 = base64.b64encode(n1_s1_s2_concat).decode("ascii")
-
-  c2_bind_quote_args = [
-    "--extend-pcr", "16",
-    "--extend-data", extend_data_b64,
-    "--qualifying-data", qualifying_data_b64,
+  # Step 2: Run single-process ceremony (all 3 phases in one Go invocation)
+  ceremony_args = [
+    "--nonce", server_nonce_b64,
+    "--session-id", session_id,
     "--elevated",
   ]
-  if ak_handle and ak_handle != "transient":
-    c2_bind_quote_args.extend(["--ak-handle", ak_handle])
-  c2_result = _run_binary_command(
-    "tpm-bind-quote",
-    args=c2_bind_quote_args,
+  ceremony_result = _run_binary_command(
+    "piv-bind-ceremony",
+    args=ceremony_args,
     timeout_seconds=60.0,
   )
-  c2_quote_data = {
-    "clock_ms": c2_result.get("clock_ms", 0),
-    "reset_count": c2_result.get("reset_count", 0),
-    "restart_count": c2_result.get("restart_count", 0),
-    "clock_safe": c2_result.get("clock_safe", True),
-    "pcr16_value_b64": c2_result.get("pcr16_value_b64", ""),
-    "signature_b64": c2_result.get("signature_b64", ""),
-    "quoted_b64": c2_result.get("quoted_b64", ""),
-  }
 
-  logger.debug("C2 quote: clock=%dms, elapsed=%dms", c2_quote_data["clock_ms"], c2_quote_data["clock_ms"] - c1_quote_data["clock_ms"])
+  c1_quote_data = ceremony_result.get("c1_quote", {})
+  c2_quote_data = ceremony_result.get("c2_quote", {})
+  s2_signature_b64 = ceremony_result.get("s2_signature_b64", "")
 
-  # Phase 5: Extract PIV attestation for the new device
+  ceremony_elapsed_ms = c2_quote_data.get("clock_ms", 0) - c1_quote_data.get("clock_ms", 0)
+  logger.info(
+    "Ceremony completed: C1=%dms, C2=%dms, elapsed=%dms",
+    c1_quote_data.get("clock_ms", 0),
+    c2_quote_data.get("clock_ms", 0),
+    ceremony_elapsed_ms,
+  )
+
+  # Step 3: Extract full PIV attestation for server-side device registration
   detected_hsms = detect_available_hsms()
   piv_hsm = None
   for hsm in detected_hsms:
@@ -733,7 +693,7 @@ def _add_device_via_colocation_binding(
     "serial": piv_attestation.get("serial_number", piv_attestation.get("serial", "")),
   }
 
-  # Phase 6: Complete binding
+  # Step 4: Complete binding with server
   complete_data = _make_authenticated_request(
     "POST",
     "/api/v1/identity/piv-bind/complete",
@@ -859,13 +819,37 @@ def burn(
     credentials=credentials,
   )
 
+  server_reported_new_trust_tier = confirm_data.get("new_trust_tier")
+
   logger.info(
-    "Device burned: %s/%s (confirmed by %s/%s, %d devices remaining)",
+    "Device burned: %s/%s (confirmed by %s/%s, %d devices remaining, tier: %s)",
     confirm_data.get("burned_device_type", device_type),
     confirm_data.get("burned_device_fingerprint", device_fingerprint)[:16],
     co_device_type, co_device_fingerprint[:16],
     confirm_data.get("remaining_active_devices", 0),
+    server_reported_new_trust_tier or "(unchanged)",
   )
+
+  if server_reported_new_trust_tier and server_reported_new_trust_tier != credentials.trust_tier:
+    updated_credentials_after_burn = StoredCredentials(
+      client_id=credentials.client_id,
+      client_secret=credentials.client_secret,
+      token_endpoint=credentials.token_endpoint,
+      api_base_url=credentials.api_base_url,
+      trust_tier=server_reported_new_trust_tier,
+      key_algorithm=credentials.key_algorithm,
+      private_key_pem=credentials.private_key_pem,
+      hsm_key_reference=credentials.hsm_key_reference,
+      enrolled_at=credentials.enrolled_at,
+      display_name=credentials.display_name,
+      agent_identity_urn=credentials.agent_identity_urn,
+      identity_certificate_chain_pem=credentials.identity_certificate_chain_pem,
+    )
+    save_credentials(updated_credentials_after_burn)
+    logger.info(
+      "Trust tier changed after burn: %s -> %s -- credentials.json updated",
+      credentials.trust_tier, server_reported_new_trust_tier,
+    )
 
   from .world import invalidate_world_cache
   invalidate_world_cache()
@@ -877,6 +861,7 @@ def burn(
     confirmed_by_device_fingerprint=confirm_data.get("confirmed_by_device_fingerprint", co_device_fingerprint),
     confirmed_by_device_type=confirm_data.get("confirmed_by_device_type", co_device_type),
     remaining_active_devices=confirm_data.get("remaining_active_devices", 0),
+    new_trust_tier=server_reported_new_trust_tier,
   )
 
 
@@ -983,6 +968,9 @@ def confirm_burn(
   Returns:
       BurnConfirmResult with details of the completed burn.
   """
+  if credentials is None:
+    credentials = load_credentials()
+
   confirm_data = _make_authenticated_request(
     "POST",
     "/api/v1/identity/devices/burn/confirm",
@@ -995,6 +983,29 @@ def confirm_burn(
     credentials=credentials,
   )
 
+  server_reported_new_trust_tier = confirm_data.get("new_trust_tier")
+
+  if server_reported_new_trust_tier and server_reported_new_trust_tier != credentials.trust_tier:
+    updated_credentials_after_burn = StoredCredentials(
+      client_id=credentials.client_id,
+      client_secret=credentials.client_secret,
+      token_endpoint=credentials.token_endpoint,
+      api_base_url=credentials.api_base_url,
+      trust_tier=server_reported_new_trust_tier,
+      key_algorithm=credentials.key_algorithm,
+      private_key_pem=credentials.private_key_pem,
+      hsm_key_reference=credentials.hsm_key_reference,
+      enrolled_at=credentials.enrolled_at,
+      display_name=credentials.display_name,
+      agent_identity_urn=credentials.agent_identity_urn,
+      identity_certificate_chain_pem=credentials.identity_certificate_chain_pem,
+    )
+    save_credentials(updated_credentials_after_burn)
+    logger.info(
+      "Trust tier changed after burn: %s -> %s -- credentials.json updated",
+      credentials.trust_tier, server_reported_new_trust_tier,
+    )
+
   from .world import invalidate_world_cache
   invalidate_world_cache()
 
@@ -1005,6 +1016,7 @@ def confirm_burn(
     confirmed_by_device_fingerprint=confirm_data.get("confirmed_by_device_fingerprint", co_device_fingerprint),
     confirmed_by_device_type=confirm_data.get("confirmed_by_device_type", co_device_type),
     remaining_active_devices=confirm_data.get("remaining_active_devices", 0),
+    new_trust_tier=server_reported_new_trust_tier,
   )
 
 

@@ -50,7 +50,7 @@ logger = logging.getLogger("oneid.helper")
 
 # -- Binary naming convention --
 BINARY_NAME_PREFIX = "oneid-enroll"
-BINARY_VERSION = "0.3.0"
+BINARY_VERSION = "0.6.0"
 
 # -- Download URLs --
 BINARY_DOWNLOAD_BASE_URL = "https://github.com/1id-com/oneid-enroll/releases/latest"

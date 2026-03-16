@@ -99,8 +99,7 @@ class TPMSetupRequiredError(EnrollmentError):
 
   1. Display a privacy warning (hardware-anchored identity implications)
   2. Call oneid.setup_tbs() if the user consents
-  3. Call oneid.record_privacy_consent(mode="sd-jwt"|"direct")
-  4. Retry enrollment
+  3. Retry enrollment
 
   This is distinct from NoHSMError (no TPM exists) and HSMAccessError
   (TPM exists but is broken/locked). This error is fixable by running

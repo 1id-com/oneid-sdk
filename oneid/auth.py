@@ -273,14 +273,13 @@ def authenticate_with_tpm(
   if api_base_url is None:
     api_base_url = credentials.api_base_url
 
-  # Step 1: Request a challenge nonce from the server
   challenge_url = f"{api_base_url}/api/v1/auth/challenge"
 
   try:
     with httpx.Client(timeout=TOKEN_REQUEST_TIMEOUT_SECONDS) as http_client:
       challenge_response = http_client.post(
         challenge_url,
-        json={"identity_id": identity_id},
+        json={"identity_id": identity_id, "device_type": "tpm"},
         headers={"User-Agent": USER_AGENT},
       )
   except httpx.ConnectError as connection_error:
@@ -423,7 +422,7 @@ def authenticate_with_piv(
     with httpx.Client(timeout=TOKEN_REQUEST_TIMEOUT_SECONDS) as http_client:
       challenge_response = http_client.post(
         challenge_url,
-        json={"identity_id": identity_id},
+        json={"identity_id": identity_id, "device_type": "piv"},
         headers={"User-Agent": USER_AGENT},
       )
   except httpx.ConnectError as connection_error:
