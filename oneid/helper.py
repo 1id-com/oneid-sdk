@@ -50,7 +50,7 @@ logger = logging.getLogger("oneid.helper")
 
 # -- Binary naming convention --
 BINARY_NAME_PREFIX = "oneid-enroll"
-BINARY_VERSION = "0.3.0"
+BINARY_VERSION = "0.6.0"
 
 # -- Download URLs --
 BINARY_DOWNLOAD_BASE_URL = "https://github.com/1id-com/oneid-enroll/releases/latest"
@@ -438,32 +438,35 @@ def activate_credential(
   hsm: dict,
   credential_blob_b64: str,
   encrypted_secret_b64: str,
-  ak_handle: str,
+  ak_handle: str = "",
 ) -> str:
-  """Decrypt a credential activation challenge via the HSM (requires elevation).
+  """Decrypt a credential activation challenge via the HSM.
 
   Runs 'oneid-enroll activate --json --elevated --credential-blob <b64>
-  --encrypted-secret <b64> --ak-handle <hex>' which uses the TPM's EK to
-  decrypt the server's MakeCredential challenge, proving the AK is in this TPM.
+  --encrypted-secret <b64>' which uses the TPM to decrypt the server's
+  MakeCredential challenge, proving the AK is in this TPM.
+
+  The AK is recreated on-demand (transient, deterministic -- same key every
+  time). If ak_handle is a persistent hex handle (backward compat), it is
+  passed via --ak-handle; otherwise the binary recreates the AK internally.
 
   Args:
       hsm: HSM dict from detect_available_hsms().
       credential_blob_b64: Base64-encoded credential blob from the server.
       encrypted_secret_b64: Base64-encoded encrypted secret from the server.
-      ak_handle: Hex string of the AK persistent handle (e.g., "0x81000100").
+      ak_handle: Optional. Hex handle for backward compat with persistent AKs.
 
   Returns:
       Base64-encoded decrypted credential secret.
   """
-  output = _run_binary_command(
-    "activate",
-    args=[
-      "--credential-blob", credential_blob_b64,
-      "--encrypted-secret", encrypted_secret_b64,
-      "--ak-handle", ak_handle,
-      "--elevated",
-    ],
-  )
+  activate_args = [
+    "--credential-blob", credential_blob_b64,
+    "--encrypted-secret", encrypted_secret_b64,
+    "--elevated",
+  ]
+  if ak_handle and ak_handle != "transient":
+    activate_args.extend(["--ak-handle", ak_handle])
+  output = _run_binary_command("activate", args=activate_args)
   return output.get("decrypted_credential", "")
 
 
@@ -811,19 +814,19 @@ def sign_challenge_with_piv(nonce_b64: str) -> dict:
   return output
 
 
-def sign_challenge_with_tpm(nonce_b64: str, ak_handle: str) -> dict:
+def sign_challenge_with_tpm(nonce_b64: str, ak_handle: str = "") -> dict:
   """Sign a challenge nonce using the TPM AK -- NO ELEVATION NEEDED.
 
   This is the core of ongoing TPM-backed authentication. The agent
   calls this to sign a server-provided nonce, proving it controls the
   same hardware that was enrolled.
 
-  The AK has UserWithAuth=true, so TPM2_Sign works at normal user
-  privilege. No UAC prompt, no admin, no sudo.
+  The AK is recreated on-demand (transient, deterministic -- same key every
+  time on the same TPM). No persistent handle needed.
 
   Args:
       nonce_b64: Base64-encoded nonce from the server.
-      ak_handle: Hex string of the AK persistent handle (e.g., "0x81000100").
+      ak_handle: Optional. Hex handle for backward compat with persistent AKs.
 
   Returns:
       Dict with:
@@ -835,11 +838,8 @@ def sign_challenge_with_tpm(nonce_b64: str, ak_handle: str) -> dict:
       NoHSMError: If no TPM is accessible.
       HSMAccessError: If signing fails.
   """
-  output = _run_binary_command(
-    "sign",
-    args=[
-      "--nonce", nonce_b64,
-      "--ak-handle", ak_handle,
-    ],
-  )
+  sign_args = ["--nonce", nonce_b64]
+  if ak_handle and ak_handle != "transient":
+    sign_args.extend(["--ak-handle", ak_handle])
+  output = _run_binary_command("sign", args=sign_args)
   return output

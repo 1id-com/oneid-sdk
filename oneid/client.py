@@ -293,6 +293,61 @@ class OneIDAPIClient:
       "decrypted_credential": decrypted_credential,
     })
 
+  def recover_begin(
+    self,
+    ek_certificate_pem: str,
+    ak_public_key_pem: str,
+    ak_tpmt_public_b64: str,
+    ek_public_key_pem: str = "",
+    ek_certificate_chain_pem: list[str] | None = None,
+  ) -> dict[str, Any]:
+    """Begin TPM-based identity recovery.
+
+    When a machine has lost credentials.json but still has its TPM, this
+    endpoint creates a MakeCredential challenge to prove hardware possession
+    and recover the existing identity's credentials.
+    """
+    request_body: dict[str, Any] = {
+      "ek_certificate_pem": ek_certificate_pem,
+      "ak_public_key_pem": ak_public_key_pem,
+      "ak_tpmt_public_b64": ak_tpmt_public_b64,
+    }
+    if ek_public_key_pem:
+      request_body["ek_public_key_pem"] = ek_public_key_pem
+    if ek_certificate_chain_pem:
+      request_body["ek_certificate_chain_pem"] = ek_certificate_chain_pem
+
+    return self._make_request("POST", "/api/v1/enroll/recover", json_body=request_body)
+
+  def recover_begin_piv(
+    self,
+    attestation_cert_pem: str,
+    attestation_chain_pem: list[str],
+    signing_key_public_pem: str,
+    hsm_type: str = "yubikey",
+  ) -> dict[str, Any]:
+    """Begin PIV-based identity recovery."""
+    return self._make_request("POST", "/api/v1/enroll/recover/piv", json_body={
+      "hsm_type": hsm_type,
+      "attestation_cert_pem": attestation_cert_pem,
+      "attestation_chain_pem": attestation_chain_pem,
+      "signing_key_public_pem": signing_key_public_pem,
+    })
+
+  def recover_activate(
+    self,
+    recovery_session_id: str,
+    decrypted_credential: str,
+  ) -> dict[str, Any]:
+    """Complete identity recovery by proving hardware possession.
+
+    Returns fresh credentials (rotated client_secret) for the recovered identity.
+    """
+    return self._make_request("POST", "/api/v1/enroll/recover/activate", json_body={
+      "enrollment_session_id": recovery_session_id,
+      "decrypted_credential": decrypted_credential,
+    })
+
   def get_identity(self, agent_id: str) -> dict[str, Any]:
     """Look up public identity information for an agent.
 
