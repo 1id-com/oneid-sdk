@@ -6,6 +6,7 @@ Orchestrates the enrollment flow for all trust tiers
 - Declared:  Pure software, generates a keypair, sends public key to server.
 - Sovereign: Spawns Go binary for TPM operations, two-phase enrollment.
 - Portable:  Spawns Go binary for YubiKey/PIV operations.
+- Enclave:   Spawns Go binary + Swift helper for Apple Secure Enclave.
 - Virtual:   Spawns Go binary for vTPM operations.
 
 CRITICAL DESIGN RULE: request_tier is a REQUIREMENT, not a preference.
@@ -46,12 +47,14 @@ TIERS_REQUIRING_HSM = frozenset({
   TrustTier.SOVEREIGN,
   TrustTier.PORTABLE,
   TrustTier.VIRTUAL,
+  TrustTier.ENCLAVE,
 })
 
 
 _AUTO_DETECT_TIER_PREFERENCE_ORDER = [
   TrustTier.SOVEREIGN,
   TrustTier.PORTABLE,
+  TrustTier.ENCLAVE,
   TrustTier.VIRTUAL,
   TrustTier.DECLARED,
 ]
@@ -199,6 +202,13 @@ def _enroll_at_specific_tier(
   elif tier == TrustTier.PORTABLE:
     return _enroll_piv_tier(
       request_tier=tier,
+      operator_email=operator_email,
+      requested_handle=requested_handle,
+      display_name=display_name,
+      api_base_url=api_base_url,
+    )
+  elif tier == TrustTier.ENCLAVE:
+    return _enroll_enclave_tier(
       operator_email=operator_email,
       requested_handle=requested_handle,
       display_name=display_name,
@@ -535,6 +545,222 @@ def _enroll_piv_tier(
     hsm_manufacturer=selected_hsm.get("manufacturer"),
     enrolled_at=enrolled_at,
     device_count=identity_data.get("device_count", 1),
+    key_algorithm=KeyAlgorithm.ECDSA_P256,
+    agent_identity_urn=agent_identity_urn or None,
+    display_name=display_name,
+  )
+
+
+ENCLAVE_KEY_APPLICATION_TAG = "com.1id.enclave.default"
+ENCLAVE_KEY_STORAGE_DIRECTORY_NAME = ".1id"
+ENCLAVE_KEY_STORAGE_SUBDIRECTORY_NAME = "enclave_keys"
+
+
+def _read_enclave_key_data_representation_from_disk() -> str | None:
+  """Read the SE dataRepresentation blob that oneid-se-helper saved to disk.
+
+  The Swift helper stores this at ~/.1id/enclave_keys/<tag>.key after
+  generating or loading a Secure Enclave key. We read it and return it
+  as a base64 string so it can be persisted inside credentials.json.
+  This blob is hardware-bound: only the specific Secure Enclave that
+  created it can decrypt the private key reference within.
+
+  Returns None if the file does not exist (non-macOS, or helper not run).
+  """
+  import base64
+  from pathlib import Path
+
+  safe_filename = (
+    ENCLAVE_KEY_APPLICATION_TAG
+    .replace("/", "_")
+    .replace("..", "_")
+  )
+  enclave_key_file_path = (
+    Path.home()
+    / ENCLAVE_KEY_STORAGE_DIRECTORY_NAME
+    / ENCLAVE_KEY_STORAGE_SUBDIRECTORY_NAME
+    / f"{safe_filename}.key"
+  )
+  if not enclave_key_file_path.exists():
+    logger.debug(
+      "Enclave key file not found at %s -- skipping dataRepresentation capture",
+      enclave_key_file_path,
+    )
+    return None
+
+  raw_key_blob_bytes = enclave_key_file_path.read_bytes()
+  encoded_blob = base64.b64encode(raw_key_blob_bytes).decode("ascii")
+  logger.info(
+    "Read enclave dataRepresentation (%d bytes) from %s",
+    len(raw_key_blob_bytes), enclave_key_file_path,
+  )
+  return encoded_blob
+
+
+def _restore_enclave_key_file_from_credentials_if_missing(
+  enclave_key_data_representation_b64: str,
+) -> None:
+  """Restore the on-disk SE key file from the blob stored in credentials.json.
+
+  The Swift helper expects the dataRepresentation at
+  ~/.1id/enclave_keys/<tag>.key. If that file was deleted (e.g. OS
+  re-image, cleanup) but the credential still holds the blob, we
+  recreate the file so the helper can sign without re-enrollment.
+  """
+  import base64
+  import os
+  import stat
+  from pathlib import Path
+
+  safe_filename = (
+    ENCLAVE_KEY_APPLICATION_TAG
+    .replace("/", "_")
+    .replace("..", "_")
+  )
+  enclave_key_file_path = (
+    Path.home()
+    / ENCLAVE_KEY_STORAGE_DIRECTORY_NAME
+    / ENCLAVE_KEY_STORAGE_SUBDIRECTORY_NAME
+    / f"{safe_filename}.key"
+  )
+
+  if enclave_key_file_path.exists():
+    return
+
+  enclave_key_file_path.parent.mkdir(parents=True, exist_ok=True)
+  raw_bytes = base64.b64decode(enclave_key_data_representation_b64)
+  enclave_key_file_path.write_bytes(raw_bytes)
+  os.chmod(enclave_key_file_path, stat.S_IRUSR | stat.S_IWUSR)
+  logger.info(
+    "Restored enclave key file (%d bytes) to %s from credentials",
+    len(raw_bytes), enclave_key_file_path,
+  )
+
+
+def _enroll_enclave_tier(
+  operator_email: str | None,
+  requested_handle: str | None,
+  display_name: str | None,
+  api_base_url: str,
+) -> Identity:
+  """Enroll at the enclave tier using an Apple Secure Enclave.
+
+  Uses the Go binary (oneid-enroll) which delegates to the Swift helper
+  (oneid-se-helper) for Secure Enclave operations. Flow:
+  1. Detect Secure Enclave presence
+  2. Generate or retrieve the Enclave P-256 key
+  3. Send public key to server /enroll/enclave/begin
+  4. Sign the nonce challenge with the Enclave key
+  5. Send signed nonce to server /enroll/activate
+  6. Receive identity + OAuth2 credentials
+  7. Store credentials locally
+
+  No elevation needed -- Secure Enclave is a user-space API.
+
+  Raises:
+      NoHSMError: No Secure Enclave found (not Apple Silicon/T2).
+      EnrollmentError: Any other enrollment failure.
+  """
+  from .helper import (
+    detect_available_hsms,
+    sign_challenge_with_enclave,
+  )
+
+  logger.info("Enrolling at enclave tier (Apple Secure Enclave required)")
+
+  detected_hsms = detect_available_hsms()
+
+  enclave_hsm = None
+  for hsm in detected_hsms:
+    if hsm.get("type") == "enclave" or hsm.get("type") == "secure_enclave":
+      enclave_hsm = hsm
+      break
+
+  if enclave_hsm is None:
+    raise NoHSMError(
+      "No Apple Secure Enclave found. The 'enclave' tier requires Apple Silicon "
+      "or a T2-equipped Mac with CryptoKit support."
+    )
+
+  enclave_public_key_pem = enclave_hsm.get("public_key_pem", "")
+  if not enclave_public_key_pem:
+    raise EnrollmentError(
+      "Secure Enclave detected but no public key was returned. "
+      "The oneid-se-helper may not be available or may have failed."
+    )
+
+  api_client = OneIDAPIClient(api_base_url=api_base_url)
+
+  begin_response = api_client.enroll_begin_enclave(
+    enclave_public_key_pem=enclave_public_key_pem,
+    operator_email=operator_email,
+    requested_handle=requested_handle,
+    display_name=display_name,
+  )
+
+  nonce_challenge_b64 = begin_response["nonce_challenge"]
+
+  sign_result = sign_challenge_with_enclave(nonce_challenge_b64)
+  signed_nonce_b64 = sign_result["signature_b64"]
+
+  activate_response = api_client.enroll_activate(
+    enrollment_session_id=begin_response["enrollment_session_id"],
+    decrypted_credential=signed_nonce_b64,
+  )
+
+  identity_data = activate_response.get("identity", {})
+  credentials_data = activate_response.get("credentials", {})
+
+  internal_id = identity_data.get("agent_id", identity_data.get("internal_id", ""))
+  agent_identity_urn = identity_data.get("agent_identity_urn", "")
+  handle = identity_data.get("handle", f"@{internal_id[:12]}")
+  trust_tier_str = identity_data.get("trust_tier", "enclave")
+  enrolled_at_str = identity_data.get("registered_at", datetime.now(timezone.utc).isoformat())
+
+  enclave_key_blob_b64 = _read_enclave_key_data_representation_from_disk()
+  if enclave_key_blob_b64 is None:
+    logger.warning(
+      "Could not capture enclave dataRepresentation -- "
+      "key file not found after enrollment. The SE key cannot be "
+      "restored if ~/.1id/enclave_keys/ is deleted."
+    )
+
+  stored_credentials = StoredCredentials(
+    client_id=credentials_data.get("client_id", internal_id),
+    client_secret=credentials_data.get("client_secret", ""),
+    token_endpoint=credentials_data.get("token_endpoint", f"{api_base_url}/realms/agents/protocol/openid-connect/token"),
+    api_base_url=api_base_url,
+    trust_tier=trust_tier_str,
+    key_algorithm="ecdsa-p256",
+    hsm_key_reference="secure-enclave",
+    enrolled_at=enrolled_at_str,
+    display_name=display_name,
+    agent_identity_urn=agent_identity_urn or None,
+    identity_certificate_chain_pem=activate_response.get("identity_certificate_chain_pem"),
+    enclave_key_data_representation_b64=enclave_key_blob_b64,
+  )
+  save_credentials(stored_credentials)
+
+  if "requested_handle" in activate_response:
+    handle_info = activate_response["requested_handle"]
+    logger.info("Vanity handle requested: %s", handle_info.get("handle"))
+    logger.info("Handle status: %s", handle_info.get("status"))
+    if handle_info.get("status") == "available":
+      logger.info("Handle %s is available for $%.2f/year", handle_info.get("handle"), handle_info.get("annual_fee_usd", 0))
+
+  try:
+    enrolled_at = datetime.fromisoformat(enrolled_at_str.replace("Z", "+00:00"))
+  except (ValueError, AttributeError):
+    enrolled_at = datetime.now(timezone.utc)
+
+  return Identity(
+    internal_id=internal_id,
+    handle=handle,
+    trust_tier=TrustTier.ENCLAVE,
+    hsm_type=HSMType.SECURE_ENCLAVE,
+    hsm_manufacturer="AAPL",
+    enrolled_at=enrolled_at,
+    device_count=1,
     key_algorithm=KeyAlgorithm.ECDSA_P256,
     agent_identity_urn=agent_identity_urn or None,
     display_name=display_name,

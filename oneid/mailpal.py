@@ -194,6 +194,7 @@ def send(
   html_body: Optional[str] = None,
   from_address: Optional[str] = None,
   include_attestation: bool = True,
+  attestation_mode: str = "sd-jwt",
   disclosed_claims: Optional[List[str]] = None,
   mailpal_api_url: Optional[str] = None,
   oneid_api_url: Optional[str] = None,
@@ -202,7 +203,7 @@ def send(
   Send an attested email via MailPal.
 
   This is the "one-call easy mode" that:
-  1. Prepares attestation proof (SD-JWT + contact token) from 1id.com
+  1. Prepares attestation proof from 1id.com
   2. Sends the email via MailPal with proof headers attached
 
   Args:
@@ -212,6 +213,10 @@ def send(
     html_body: HTML body.
     from_address: Sender address. If None, MailPal uses the agent's primary address.
     include_attestation: Whether to include attestation headers (default True).
+    attestation_mode: Which RFC attestation mode(s) to use:
+      "sd-jwt"  -- Mode 2 only (Hardware-Trust-Proof header, default)
+      "direct"  -- Mode 1 only (Hardware-Attestation header with CMS bundle)
+      "both"    -- Combined Mode (Section 7: both headers in one message)
     disclosed_claims: Which SD-JWT claims to disclose. Default: ["trust_tier"].
     mailpal_api_url: Override the MailPal API URL.
     oneid_api_url: Override the 1id.com API URL.
@@ -219,18 +224,47 @@ def send(
   Returns:
     SendResult with message_id and attestation details.
   """
-  proof = None
-  if include_attestation:
-    email_content_for_digest = (text_body or html_body or "").encode("utf-8")
-    proof = prepare_attestation(
-      content=email_content_for_digest,
-      disclosed_claims=disclosed_claims,
-      api_base_url=oneid_api_url,
-    )
-
   creds = load_credentials()
   default_from = f"{creds.client_id}@mailpal.com"
   effective_from = from_address or default_from
+
+  import datetime
+  import email.utils
+
+  rfc2822_date = email.utils.formatdate(localtime=True)
+  generated_message_id = email.utils.make_msgid(domain="mailpal.com")
+
+  email_headers_for_attestation_nonce: Dict[str, str] = {
+    "From": effective_from,
+    "To": ", ".join(to),
+    "Subject": subject,
+    "Date": rfc2822_date,
+    "Message-ID": generated_message_id,
+  }
+
+  effective_body_bytes = (text_body or html_body or "").encode("utf-8")
+
+  proof = None
+  direct_attestation_proof = None
+
+  if include_attestation:
+    include_sd_jwt_mode = attestation_mode in ("sd-jwt", "both")
+    include_direct_mode = attestation_mode in ("direct", "both")
+
+    if include_sd_jwt_mode:
+      proof = prepare_attestation(
+        email_headers=email_headers_for_attestation_nonce,
+        body=effective_body_bytes,
+        disclosed_claims=disclosed_claims,
+        api_base_url=oneid_api_url,
+      )
+
+    if include_direct_mode:
+      from .attestation import prepare_direct_hardware_attestation
+      direct_attestation_proof = prepare_direct_hardware_attestation(
+        email_headers=email_headers_for_attestation_nonce,
+        body=effective_body_bytes,
+      )
 
   send_body: Dict[str, Any] = {
     "to": to,
@@ -242,16 +276,24 @@ def send(
   if effective_from:
     send_body["from"] = effective_from
 
+  send_body["date"] = rfc2822_date
+  send_body["message_id"] = generated_message_id
+
+  custom_headers = {}
   if proof:
-    custom_headers = {}
     if proof.sd_jwt:
       custom_headers["Hardware-Trust-Proof"] = proof.sd_jwt
     if proof.contact_token:
       custom_headers["X-1ID-Contact-Token"] = proof.contact_token
     if proof.content_digest:
       custom_headers["X-1ID-Content-Digest"] = proof.content_digest
-    if custom_headers:
-      send_body["custom_headers"] = custom_headers
+  if direct_attestation_proof:
+    if direct_attestation_proof.hardware_attestation_header_value:
+      custom_headers["Hardware-Attestation"] = direct_attestation_proof.hardware_attestation_header_value
+    if not proof and direct_attestation_proof.content_digest:
+      custom_headers["X-1ID-Content-Digest"] = direct_attestation_proof.content_digest
+  if custom_headers:
+    send_body["custom_headers"] = custom_headers
 
   url = f"{mailpal_api_url or _MAILPAL_API_BASE_URL}/api/v1/send"
 

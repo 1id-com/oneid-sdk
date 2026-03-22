@@ -58,7 +58,13 @@ from .identity import (
   TrustTier,
 )
 from .keys import sign_challenge_with_private_key
-from .attestation import prepare_attestation, AttestationProof
+from .attestation import (
+  prepare_attestation,
+  prepare_direct_hardware_attestation,
+  build_cms_signed_data_for_direct_attestation,
+  compute_attestation_digest_for_direct_mode,
+  AttestationProof,
+)
 from .verify import (
   sign_challenge,
   verify_peer_identity,
@@ -314,6 +320,9 @@ __all__ = [
   "setup_tbs",
   "sign_challenge_with_private_key",
   "prepare_attestation",
+  "prepare_direct_hardware_attestation",
+  "build_cms_signed_data_for_direct_attestation",
+  "compute_attestation_digest_for_direct_mode",
   "AttestationProof",
   "mailpal",
   # Data types

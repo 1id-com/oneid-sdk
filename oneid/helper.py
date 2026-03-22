@@ -814,6 +814,35 @@ def sign_challenge_with_piv(nonce_b64: str) -> dict:
   return output
 
 
+def sign_challenge_with_enclave(nonce_b64: str) -> dict:
+  """Sign a challenge nonce using the Apple Secure Enclave -- NO ELEVATION NEEDED.
+
+  Uses the P-256 key stored in the Secure Enclave via the Go binary.
+  Only available on macOS with Apple Silicon or T2 security chip.
+
+  Args:
+      nonce_b64: Base64-encoded nonce from the server.
+
+  Returns:
+      Dict with:
+        - signature_b64: Base64-encoded ECDSA-SHA256 signature
+        - algorithm: "ecdsa-p256-sha256"
+        - key_tag: Keychain application tag identifying the key
+
+  Raises:
+      NoHSMError: If Secure Enclave is not available.
+      HSMAccessError: If signing fails.
+  """
+  output = _run_binary_command(
+    "sign",
+    args=[
+      "--nonce", nonce_b64,
+      "--type", "enclave",
+    ],
+  )
+  return output
+
+
 def sign_challenge_with_tpm(nonce_b64: str, ak_handle: str = "") -> dict:
   """Sign a challenge nonce using the TPM AK -- NO ELEVATION NEEDED.
 

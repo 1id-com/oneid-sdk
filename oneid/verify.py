@@ -135,6 +135,30 @@ def _sign_with_piv(nonce_bytes: bytes) -> tuple[bytes, str]:
   return base64.b64decode(signature_b64), algo_name
 
 
+def _sign_with_enclave(
+  nonce_bytes: bytes,
+  enclave_key_data_representation_b64: str | None = None,
+) -> tuple[bytes, str]:
+  """Sign using the Apple Secure Enclave via the Go binary. Returns (signature_bytes, algorithm).
+
+  Before invoking the helper, ensures the on-disk SE key file exists.
+  If the file was deleted but credentials.json still holds the
+  dataRepresentation blob, restores it so the helper can sign.
+  """
+  from .enroll import _restore_enclave_key_file_from_credentials_if_missing
+  from .helper import sign_challenge_with_enclave
+
+  if enclave_key_data_representation_b64:
+    _restore_enclave_key_file_from_credentials_if_missing(
+      enclave_key_data_representation_b64,
+    )
+
+  nonce_b64 = base64.b64encode(nonce_bytes).decode("ascii")
+  result = sign_challenge_with_enclave(nonce_b64)
+  signature_b64 = result.get("signature_b64", "")
+  return base64.b64decode(signature_b64), "ES256"
+
+
 def sign_challenge(nonce_bytes: bytes) -> IdentityProofBundle:
   """Sign a verifier-provided nonce and assemble a proof bundle.
 
@@ -175,6 +199,12 @@ def sign_challenge(nonce_bytes: bytes) -> IdentityProofBundle:
 
   elif trust_tier == "portable" or creds.hsm_key_reference == "piv-slot-9a":
     signature_bytes, algorithm = _sign_with_piv(nonce_bytes)
+
+  elif trust_tier == "enclave":
+    signature_bytes, algorithm = _sign_with_enclave(
+      nonce_bytes,
+      enclave_key_data_representation_b64=creds.enclave_key_data_representation_b64,
+    )
 
   elif creds.private_key_pem:
     signature_bytes = _sign_with_software_key(nonce_bytes, creds.private_key_pem)
@@ -405,15 +435,10 @@ def verify_peer_identity(
     san_ext = leaf_cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
     uris = san_ext.value.get_values_for_type(x509.UniformResourceIdentifier)
     for uri in uris:
-<<<<<<< HEAD
-      if uri.startswith("urn:oneid:agent:"):
-        verified_agent_id = uri.replace("urn:oneid:agent:", "")
-=======
       if uri.startswith("urn:aid:"):
         last_colon_position = uri.rfind(":")
         if last_colon_position > len("urn:aid:"):
           verified_agent_id = uri[last_colon_position + 1:]
->>>>>>> b9853a2de3341111bf626d58cedbe42b087a1417
         break
   except x509.ExtensionNotFound:
     pass

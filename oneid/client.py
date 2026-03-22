@@ -271,6 +271,40 @@ class OneIDAPIClient:
 
     return self._make_request("POST", "/api/v1/enroll/begin/piv", json_body=request_body)
 
+  def enroll_begin_enclave(
+    self,
+    enclave_public_key_pem: str,
+    operator_email: str | None = None,
+    requested_handle: str | None = None,
+    display_name: str | None = None,
+  ) -> dict[str, Any]:
+    """Begin enclave enrollment by submitting the Secure Enclave public key.
+
+    Server validates the key format, generates a nonce challenge, and returns
+    a session ID. The client must sign the nonce with the Enclave key and
+    submit it to enroll_activate().
+
+    Args:
+        enclave_public_key_pem: PEM-encoded ECDSA P-256 public key from the Secure Enclave.
+        operator_email: Optional operator contact email.
+        requested_handle: Optional vanity handle.
+        display_name: Optional friendly agent name.
+
+    Returns:
+        Server response with enrollment_session_id, nonce_challenge, trust_tier.
+    """
+    request_body: dict[str, Any] = {
+      "enclave_public_key_pem": enclave_public_key_pem,
+    }
+    if operator_email:
+      request_body["operator_email"] = operator_email
+    if requested_handle:
+      request_body["requested_handle"] = requested_handle
+    if display_name:
+      request_body["display_name"] = display_name
+
+    return self._make_request("POST", "/api/v1/enroll/enclave/begin", json_body=request_body)
+
   def enroll_activate(
     self,
     enrollment_session_id: str,

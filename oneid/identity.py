@@ -21,11 +21,14 @@ class TrustTier(str, Enum):
   Ordered from highest to lowest Sybil resistance:
   - sovereign (TPM): Non-portable discrete/firmware TPM, manufacturer CA chain verifiable
   - portable  (PIV): Portable PIV device (YubiKey/Nitrokey/Feitian), manufacturer-attested
+  - enclave   (ENC): Apple Secure Enclave (T2/Apple Silicon), hardware-backed but NOT
+                      Sybil-resistant (factory reset creates new key, no manufacturer attestation)
   - virtual   (VRT): Hypervisor vTPM (VMware/Hyper-V/QEMU), hypervisor-attested
   - declared  (SFT): Software-only, no hardware proof, works everywhere
   """
   SOVEREIGN = "sovereign"
   PORTABLE = "portable"
+  ENCLAVE = "enclave"
   VIRTUAL = "virtual"
   DECLARED = "declared"
 

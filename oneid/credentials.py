@@ -71,6 +71,7 @@ class StoredCredentials:
   display_name: str | None = None
   agent_identity_urn: str | None = None
   identity_certificate_chain_pem: str | None = None
+  enclave_key_data_representation_b64: str | None = None
 
 
 def get_credentials_directory() -> Path:
@@ -162,6 +163,10 @@ def save_credentials(credentials: StoredCredentials) -> Path:
     credentials_dict["display_name"] = credentials.display_name
   if credentials.agent_identity_urn is not None:
     credentials_dict["agent_identity_urn"] = credentials.agent_identity_urn
+  if credentials.identity_certificate_chain_pem is not None:
+    credentials_dict["identity_certificate_chain_pem"] = credentials.identity_certificate_chain_pem
+  if credentials.enclave_key_data_representation_b64 is not None:
+    credentials_dict["enclave_key_data_representation_b64"] = credentials.enclave_key_data_representation_b64
 
   credentials_file_path.write_text(
     json.dumps(credentials_dict, indent=2) + "\n",
@@ -213,6 +218,8 @@ def load_credentials() -> StoredCredentials:
     enrolled_at=credentials_dict.get("enrolled_at"),
     display_name=credentials_dict.get("display_name"),
     agent_identity_urn=credentials_dict.get("agent_identity_urn"),
+    identity_certificate_chain_pem=credentials_dict.get("identity_certificate_chain_pem"),
+    enclave_key_data_representation_b64=credentials_dict.get("enclave_key_data_representation_b64"),
   )
 
 
