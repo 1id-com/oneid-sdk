@@ -51,6 +51,7 @@ class SendResult:
   attestation_headers_included: bool = False
   contact_token_header_included: bool = False
   sd_jwt_header_included: bool = False
+  direct_attestation_header_included: bool = False
 
 
 @dataclass
@@ -315,9 +316,10 @@ def send(
   return SendResult(
     message_id=data.get("message_id"),
     from_address=data.get("from"),
-    attestation_headers_included=proof is not None,
+    attestation_headers_included=proof is not None or direct_attestation_proof is not None,
     contact_token_header_included=proof is not None and proof.contact_token is not None,
     sd_jwt_header_included=proof is not None and proof.sd_jwt is not None,
+    direct_attestation_header_included=direct_attestation_proof is not None and direct_attestation_proof.hardware_attestation_header_value is not None,
   )
 
 

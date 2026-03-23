@@ -401,7 +401,7 @@ def detect_available_hsms() -> list[dict]:
   """
   try:
     output = _run_binary_command("detect")
-    return output.get("hsms", [])
+    return output.get("hsms") or []
   except NoHSMError:
     return []
   except BinaryNotFoundError:

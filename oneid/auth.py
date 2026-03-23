@@ -98,11 +98,33 @@ def get_token(
 
 
 def _authenticate_with_hardware_challenge_response(credentials: StoredCredentials) -> Token:
-  """Route to TPM or PIV challenge-response based on trust tier.
+  """Route to TPM or PIV challenge-response based on local device type.
+
+  Uses hsm_key_reference to determine which signing path to use, with
+  trust_tier as a fallback. This is necessary because an identity can
+  have multiple device types (e.g. sovereign tier recovered via PIV on
+  a different machine stores trust_tier=sovereign but hsm_key_reference=piv-slot-9a).
 
   Raises HardwareDeviceNotPresentError on any hardware failure -- never
   falls back to client_credentials.
   """
+  local_device_is_piv = (
+    getattr(credentials, "hsm_key_reference", None) or ""
+  ).startswith("piv-")
+
+  if local_device_is_piv or credentials.trust_tier in _TIERS_USING_PIV:
+    try:
+      logger.debug("Attempting PIV-based passwordless authentication...")
+      return authenticate_with_piv(credentials=credentials)
+    except HardwareDeviceNotPresentError:
+      raise
+    except Exception as piv_error:
+      raise HardwareDeviceNotPresentError(
+        f"PIV authentication failed and hardware is required for "
+        f"{credentials.trust_tier} tier. YubiKey may be absent or "
+        f"inaccessible: {piv_error}"
+      ) from piv_error
+
   if credentials.trust_tier in _TIERS_USING_TPM:
     try:
       logger.debug("Attempting TPM-based passwordless authentication...")
@@ -115,19 +137,6 @@ def _authenticate_with_hardware_challenge_response(credentials: StoredCredential
         f"{credentials.trust_tier} tier. Device may be absent or "
         f"inaccessible: {tpm_error}"
       ) from tpm_error
-
-  if credentials.trust_tier in _TIERS_USING_PIV:
-    try:
-      logger.debug("Attempting PIV-based passwordless authentication...")
-      return authenticate_with_piv(credentials=credentials)
-    except HardwareDeviceNotPresentError:
-      raise
-    except Exception as piv_error:
-      raise HardwareDeviceNotPresentError(
-        f"PIV authentication failed and hardware is required for "
-        f"{credentials.trust_tier} tier. YubiKey may be absent or "
-        f"inaccessible: {piv_error}"
-      ) from piv_error
 
   raise HardwareDeviceNotPresentError(
     f"Trust tier '{credentials.trust_tier}' requires hardware but no "

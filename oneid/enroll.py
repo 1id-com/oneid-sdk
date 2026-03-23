@@ -668,7 +668,7 @@ def _enroll_enclave_tier(
 
   logger.info("Enrolling at enclave tier (Apple Secure Enclave required)")
 
-  detected_hsms = detect_available_hsms()
+  detected_hsms = detect_available_hsms() or []
 
   enclave_hsm = None
   for hsm in detected_hsms:

@@ -1,4 +1,4 @@
 """Version string for the oneid-sdk package."""
 
-__version__ = "0.10.0"
+__version__ = "1.0.0"
 USER_AGENT = f"oneid-sdk-python/{__version__}"
