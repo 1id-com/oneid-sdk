@@ -10,8 +10,10 @@ client_credentials. If the hardware device is absent, get_token() raises
 HardwareDeviceNotPresentError. This is intentional: a stolen
 credentials.json is useless without the physical device.
 
-The token endpoint is Keycloak:
-  POST https://1id.com/realms/agents/protocol/openid-connect/token
+Token endpoint (F-05 hardened):
+  POST https://1id.com/api/v1/auth/token  (declared tier only)
+  POST https://1id.com/api/v1/auth/challenge + /verify  (hardware tiers)
+  Direct Keycloak token endpoint is blocked by nginx to external clients.
 """
 
 from __future__ import annotations
@@ -38,9 +40,10 @@ logger = logging.getLogger("oneid.auth")
 TOKEN_REFRESH_MARGIN_SECONDS = 60
 TOKEN_REQUEST_TIMEOUT_SECONDS = 15.0
 
-_TIERS_REQUIRING_HARDWARE_AUTH = frozenset({"sovereign", "portable", "virtual"})
+_TIERS_REQUIRING_HARDWARE_AUTH = frozenset({"sovereign", "portable", "enclave", "virtual"})
 _TIERS_USING_TPM = frozenset({"sovereign", "virtual"})
 _TIERS_USING_PIV = frozenset({"portable"})
+_TIERS_USING_ENCLAVE = frozenset({"enclave"})
 
 # -- Module-level token cache --
 _cached_token: Token | None = None
@@ -92,7 +95,7 @@ def get_token(
     _cached_token = token
     return token
 
-  token = _request_token_from_keycloak(credentials)
+  token = _request_token_via_api_proxy(credentials)
   _cached_token = token
   return token
 
@@ -144,8 +147,13 @@ def _authenticate_with_hardware_challenge_response(credentials: StoredCredential
   )
 
 
-def _request_token_from_keycloak(credentials: StoredCredentials) -> Token:
-  """Request a new access token from Keycloak using client_credentials grant.
+def _request_token_via_api_proxy(credentials: StoredCredentials) -> Token:
+  """Request a new access token via the 1id API token proxy.
+
+  For declared-tier identities, this is the only permitted token path.
+  The API proxy (POST /api/v1/auth/token) validates that the identity
+  is not hardware-backed before forwarding to Keycloak. This prevents
+  stolen credentials.json from obtaining hardware-tier JWTs.
 
   Args:
       credentials: The stored enrollment credentials.
@@ -189,10 +197,13 @@ def _request_token_from_keycloak(credentials: StoredCredentials) -> Token:
     ) from http_error
 
   if response.status_code != 200:
-    # Keycloak returns error details in JSON
     try:
       error_body = response.json()
-      error_description = error_body.get("error_description", error_body.get("error", "Unknown error"))
+      error_description = (
+        error_body.get("error", {}).get("message")
+        or error_body.get("error_description")
+        or error_body.get("error", "Unknown error")
+      )
     except Exception:
       error_description = f"HTTP {response.status_code}: {response.text[:200]}"
 
@@ -207,7 +218,9 @@ def _request_token_from_keycloak(credentials: StoredCredentials) -> Token:
       f"Invalid JSON in token response: {json_error}"
     ) from json_error
 
-  # Parse the standard OAuth2 token response
+  if "ok" in token_response and "data" in token_response:
+    token_response = token_response["data"]
+
   access_token = token_response.get("access_token")
   if not access_token:
     raise AuthenticationError("Token response missing 'access_token' field")

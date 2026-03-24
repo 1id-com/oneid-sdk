@@ -31,7 +31,7 @@ from .exceptions import NotEnrolledError
 
 # -- Default server endpoints --
 DEFAULT_API_BASE_URL = "https://1id.com"
-DEFAULT_TOKEN_ENDPOINT = "https://1id.com/realms/agents/protocol/openid-connect/token"
+DEFAULT_TOKEN_ENDPOINT = "https://1id.com/api/v1/auth/token"
 
 # -- Credential file name --
 CREDENTIALS_FILENAME = "credentials.json"
@@ -178,6 +178,26 @@ def save_credentials(credentials: StoredCredentials) -> Path:
   return credentials_file_path
 
 
+def _verify_and_enforce_owner_only_permissions(file_path: Path) -> None:
+  """Check credentials file permissions and fix them if they are too open.
+
+  On Unix/macOS, the file MUST be 0600 (owner read+write only). If group
+  or other bits are set, this function removes them immediately. This runs
+  on every load so that permissions cannot drift without being corrected.
+
+  On Windows, %APPDATA% is user-private by default so no check is needed.
+  """
+  if platform.system() == "Windows":
+    return
+  try:
+    current_mode = file_path.stat().st_mode
+    owner_only_mode = stat.S_IRUSR | stat.S_IWUSR
+    if current_mode & 0o7777 != owner_only_mode:
+      os.chmod(file_path, owner_only_mode)
+  except OSError:
+    pass
+
+
 def load_credentials() -> StoredCredentials:
   """Load enrollment credentials from the local credentials file.
 
@@ -195,6 +215,8 @@ def load_credentials() -> StoredCredentials:
       f"No credentials file found at {credentials_file_path}. "
       "Call oneid.enroll() to create an identity first."
     )
+
+  _verify_and_enforce_owner_only_permissions(credentials_file_path)
 
   try:
     raw_json_text = credentials_file_path.read_text(encoding="utf-8")

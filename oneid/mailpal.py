@@ -194,8 +194,11 @@ def send(
   text_body: Optional[str] = None,
   html_body: Optional[str] = None,
   from_address: Optional[str] = None,
+  from_display_name: Optional[str] = None,
+  cc: Optional[List[str]] = None,
+  bcc: Optional[List[str]] = None,
   include_attestation: bool = True,
-  attestation_mode: str = "sd-jwt",
+  attestation_mode: str = "both",
   disclosed_claims: Optional[List[str]] = None,
   mailpal_api_url: Optional[str] = None,
   oneid_api_url: Optional[str] = None,
@@ -207,17 +210,34 @@ def send(
   1. Prepares attestation proof from 1id.com
   2. Sends the email via MailPal with proof headers attached
 
+  All address fields accept any format an agent might produce:
+    - "user@domain"
+    - '"Display Name" <user@domain>'
+    - "Display Name <user@domain>"
+    - Comma-separated combinations of the above
+
   Args:
-    to: List of recipient email addresses.
+    to: List of recipient addresses (To header, visible to all recipients).
     subject: Email subject line.
     text_body: Plain text body (at least one of text_body/html_body required).
     html_body: HTML body.
-    from_address: Sender address. If None, MailPal uses the agent's primary address.
+    from_address: Sender address. Accepts "Name <addr>" format. If None,
+        MailPal uses the agent's primary address.
+    from_display_name: Override display name for the From header. Takes
+        precedence over any name parsed from from_address or the account
+        default. Supports full Unicode (emoji, CJK, accented characters).
+    cc: List of Cc recipient addresses (visible to all recipients).
+    bcc: List of Bcc recipient addresses (receive the message but are
+        hidden from all other recipients -- names are accepted but not
+        placed in any header).
     include_attestation: Whether to include attestation headers (default True).
     attestation_mode: Which RFC attestation mode(s) to use:
-      "sd-jwt"  -- Mode 2 only (Hardware-Trust-Proof header, default)
+      "both"    -- Combined Mode (Section 7: both headers in one message, default).
+                   Mode 1 is silently skipped if the identity lacks a cert chain
+                   (e.g. declared tier or pre-certificate enrollments).
+      "sd-jwt"  -- Mode 2 only (Hardware-Trust-Proof header)
       "direct"  -- Mode 1 only (Hardware-Attestation header with CMS bundle)
-      "both"    -- Combined Mode (Section 7: both headers in one message)
+      "none"    -- No attestation headers (overrides include_attestation)
     disclosed_claims: Which SD-JWT claims to disclose. Default: ["trust_tier"].
     mailpal_api_url: Override the MailPal API URL.
     oneid_api_url: Override the 1id.com API URL.
@@ -248,6 +268,9 @@ def send(
   proof = None
   direct_attestation_proof = None
 
+  if attestation_mode == "none":
+    include_attestation = False
+
   if include_attestation:
     include_sd_jwt_mode = attestation_mode in ("sd-jwt", "both")
     include_direct_mode = attestation_mode in ("direct", "both")
@@ -261,11 +284,14 @@ def send(
       )
 
     if include_direct_mode:
-      from .attestation import prepare_direct_hardware_attestation
-      direct_attestation_proof = prepare_direct_hardware_attestation(
-        email_headers=email_headers_for_attestation_nonce,
-        body=effective_body_bytes,
-      )
+      try:
+        from .attestation import prepare_direct_hardware_attestation
+        direct_attestation_proof = prepare_direct_hardware_attestation(
+          email_headers=email_headers_for_attestation_nonce,
+          body=effective_body_bytes,
+        )
+      except (NotEnrolledError, ValueError) as mode1_error:
+        logger.info("Mode 1 (direct) attestation skipped: %s", mode1_error)
 
   send_body: Dict[str, Any] = {
     "to": to,
@@ -276,6 +302,12 @@ def send(
     send_body["html"] = html_body
   if effective_from:
     send_body["from"] = effective_from
+  if from_display_name:
+    send_body["from_display_name"] = from_display_name
+  if cc:
+    send_body["cc"] = cc
+  if bcc:
+    send_body["bcc"] = bcc
 
   send_body["date"] = rfc2822_date
   send_body["message_id"] = generated_message_id
@@ -286,13 +318,9 @@ def send(
       custom_headers["Hardware-Trust-Proof"] = proof.sd_jwt
     if proof.contact_token:
       custom_headers["X-1ID-Contact-Token"] = proof.contact_token
-    if proof.content_digest:
-      custom_headers["X-1ID-Content-Digest"] = proof.content_digest
   if direct_attestation_proof:
     if direct_attestation_proof.hardware_attestation_header_value:
       custom_headers["Hardware-Attestation"] = direct_attestation_proof.hardware_attestation_header_value
-    if not proof and direct_attestation_proof.content_digest:
-      custom_headers["X-1ID-Content-Digest"] = direct_attestation_proof.content_digest
   if custom_headers:
     send_body["custom_headers"] = custom_headers
 
