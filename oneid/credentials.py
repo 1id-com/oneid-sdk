@@ -72,6 +72,8 @@ class StoredCredentials:
   agent_identity_urn: str | None = None
   identity_certificate_chain_pem: str | None = None
   enclave_key_data_representation_b64: str | None = None
+  mailpal_email: str | None = None
+  mailpal_app_password: str | None = None
 
 
 def get_credentials_directory() -> Path:
@@ -167,6 +169,10 @@ def save_credentials(credentials: StoredCredentials) -> Path:
     credentials_dict["identity_certificate_chain_pem"] = credentials.identity_certificate_chain_pem
   if credentials.enclave_key_data_representation_b64 is not None:
     credentials_dict["enclave_key_data_representation_b64"] = credentials.enclave_key_data_representation_b64
+  if credentials.mailpal_email is not None:
+    credentials_dict["mailpal_email"] = credentials.mailpal_email
+  if credentials.mailpal_app_password is not None:
+    credentials_dict["mailpal_app_password"] = credentials.mailpal_app_password
 
   credentials_file_path.write_text(
     json.dumps(credentials_dict, indent=2) + "\n",
@@ -242,6 +248,8 @@ def load_credentials() -> StoredCredentials:
     agent_identity_urn=credentials_dict.get("agent_identity_urn"),
     identity_certificate_chain_pem=credentials_dict.get("identity_certificate_chain_pem"),
     enclave_key_data_representation_b64=credentials_dict.get("enclave_key_data_representation_b64"),
+    mailpal_email=credentials_dict.get("mailpal_email"),
+    mailpal_app_password=credentials_dict.get("mailpal_app_password"),
   )
 
 

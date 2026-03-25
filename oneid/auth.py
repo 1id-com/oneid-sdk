@@ -165,7 +165,8 @@ def _request_token_via_api_proxy(credentials: StoredCredentials) -> Token:
       AuthenticationError: If the token request fails (401, 403, etc.).
       NetworkError: If the token endpoint cannot be reached.
   """
-  token_endpoint = credentials.token_endpoint
+  api_base = getattr(credentials, "api_base_url", None) or "https://1id.com"
+  token_endpoint = f"{api_base.rstrip('/')}/api/v1/auth/token"
 
   request_body = {
     "grant_type": "client_credentials",

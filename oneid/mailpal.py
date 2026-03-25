@@ -17,15 +17,30 @@ MailPal convenience functions for the 1id.com SDK.
     # Get contact token for email headers
     token = oneid.mailpal.get_contact_token()
 
-These are convenience wrappers around the MailPal REST API that handle
-authentication, attestation header injection, and error mapping.
+Architecture (v2 -- local MIME assembly + direct SMTP):
+
+  send() builds the MIME message locally using Python's email.message module,
+  extracts the exact wire-format bytes (including RFC 2047 encoding), computes
+  attestation nonces and signatures from those bytes, injects attestation
+  headers, then submits the fully-assembled message directly to
+  smtp.mailpal.com via SMTP with app_password AUTH.
+
+  This guarantees the SDK signs the same byte-for-byte header values that the
+  receiving milter will verify, eliminating the canonicalization mismatch that
+  occurred when the old REST API returned decoded-Unicode headers while
+  Stalwart transmitted RFC 2047-encoded headers on the wire.
 
 Design: 110_mailpal_sprint_to_go-live.md Section 7.3.1 & 7.4
 """
 
 from __future__ import annotations
 
+import email as email_stdlib
+import email.message
+import email.policy
+import email.utils
 import logging
+import smtplib
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -34,13 +49,16 @@ import httpx
 from ._version import USER_AGENT
 from .auth import get_token
 from .attestation import prepare_attestation, AttestationProof
-from .credentials import load_credentials
+from .credentials import load_credentials, save_credentials
 from .exceptions import AuthenticationError, NetworkError, NotEnrolledError
 
 logger = logging.getLogger("oneid.mailpal")
 
 _MAILPAL_API_BASE_URL = "https://mailpal.com"
 _HTTP_TIMEOUT_SECONDS = 30.0
+_SMTP_HOST = "smtp.mailpal.com"
+_SMTP_PORT_STARTTLS = 587
+_SMTP_TIMEOUT_SECONDS = 30
 
 
 @dataclass
@@ -178,7 +196,7 @@ def activate(
       attempt_limit=data.get("attempt_limit", 3),
     )
 
-  return MailpalAccount(
+  account = MailpalAccount(
     primary_email=data.get("primary_email", ""),
     vanity_email=data.get("vanity_email"),
     app_password=data.get("app_password"),
@@ -186,6 +204,58 @@ def activate(
     smtp=data.get("smtp"),
     imap=data.get("imap"),
   )
+
+  if account.primary_email:
+    try:
+      creds = load_credentials()
+      mailpal_credentials_changed = False
+      if creds.mailpal_email != account.primary_email:
+        creds.mailpal_email = account.primary_email
+        mailpal_credentials_changed = True
+      if account.app_password and creds.mailpal_app_password != account.app_password:
+        creds.mailpal_app_password = account.app_password
+        mailpal_credentials_changed = True
+      if mailpal_credentials_changed:
+        save_credentials(creds)
+        logger.info("Persisted MailPal SMTP credentials to credentials.json")
+    except Exception as persist_error:
+      logger.warning("Could not persist MailPal credentials: %s", persist_error)
+
+  return account
+
+
+def _fold_long_header_value_for_smtp_transmission(header_name: str, header_value: str) -> str:
+  """Fold a header into continuation lines per RFC 5322 Section 2.2.3.
+
+  Long attestation headers (SD-JWT, CMS chain) can exceed the 998-character
+  hard limit. This function folds at 76-char boundaries using CRLF + SP
+  continuation, which the milter unfolds before verification.
+  """
+  full_line = f"{header_name}: {header_value}"
+  if len(full_line) <= 76:
+    return full_line
+  first_line = full_line[:76]
+  remaining = full_line[76:]
+  lines = [first_line]
+  while remaining:
+    chunk = remaining[:75]
+    lines.append(" " + chunk)
+    remaining = remaining[75:]
+  return "\r\n".join(lines)
+
+
+def _extract_all_envelope_recipient_addresses(
+  to_list: List[str],
+  cc_list: Optional[List[str]],
+  bcc_list: Optional[List[str]],
+) -> List[str]:
+  """Parse all recipient lists and extract bare email addresses for RCPT TO."""
+  all_recipients: List[str] = []
+  for address_list in [to_list, cc_list or [], bcc_list or []]:
+    for _, email_address in email.utils.getaddresses(address_list):
+      if email_address:
+        all_recipients.append(email_address)
+  return all_recipients
 
 
 def send(
@@ -200,15 +270,16 @@ def send(
   include_attestation: bool = True,
   attestation_mode: str = "both",
   disclosed_claims: Optional[List[str]] = None,
-  mailpal_api_url: Optional[str] = None,
   oneid_api_url: Optional[str] = None,
+  smtp_host: Optional[str] = None,
+  smtp_port: Optional[int] = None,
 ) -> SendResult:
   """
-  Send an attested email via MailPal.
+  Send an attested email via direct SMTP submission to smtp.mailpal.com.
 
-  This is the "one-call easy mode" that:
-  1. Prepares attestation proof from 1id.com
-  2. Sends the email via MailPal with proof headers attached
+  Builds the MIME message locally, computes attestation from the exact
+  wire-format bytes (guaranteeing the milter verifies the same bytes),
+  injects attestation headers, and submits via SMTP with STARTTLS.
 
   All address fields accept any format an agent might produce:
     - "user@domain"
@@ -221,64 +292,105 @@ def send(
     subject: Email subject line.
     text_body: Plain text body (at least one of text_body/html_body required).
     html_body: HTML body.
-    from_address: Sender address. Accepts "Name <addr>" format. If None,
-        MailPal uses the agent's primary address.
+    from_address: Sender email address (bare email or "Name <addr>" format).
+        If None, uses the stored mailpal_email or {client_id}@mailpal.com.
+        The agent may use any @mailpal.com alias it owns.
     from_display_name: Override display name for the From header. Takes
         precedence over any name parsed from from_address or the account
         default. Supports full Unicode (emoji, CJK, accented characters).
     cc: List of Cc recipient addresses (visible to all recipients).
     bcc: List of Bcc recipient addresses (receive the message but are
-        hidden from all other recipients -- names are accepted but not
-        placed in any header).
+        hidden from all other recipients -- not placed in any header).
     include_attestation: Whether to include attestation headers (default True).
     attestation_mode: Which RFC attestation mode(s) to use:
-      "both"    -- Combined Mode (Section 7: both headers in one message, default).
-                   Mode 1 is silently skipped if the identity lacks a cert chain
-                   (e.g. declared tier or pre-certificate enrollments).
+      "both"    -- Combined Mode (Section 7: both headers, default).
+                   Mode 1 is silently skipped if the identity lacks a cert chain.
       "sd-jwt"  -- Mode 2 only (Hardware-Trust-Proof header)
       "direct"  -- Mode 1 only (Hardware-Attestation header with CMS bundle)
       "none"    -- No attestation headers (overrides include_attestation)
     disclosed_claims: Which SD-JWT claims to disclose. Default: ["trust_tier"].
-    mailpal_api_url: Override the MailPal API URL.
     oneid_api_url: Override the 1id.com API URL.
+    smtp_host: Override SMTP host (default: smtp.mailpal.com).
+    smtp_port: Override SMTP port (default: 587/STARTTLS).
 
   Returns:
     SendResult with message_id and attestation details.
   """
   creds = load_credentials()
-  default_from = f"{creds.client_id}@mailpal.com"
-  effective_from = from_address or default_from
 
-  import datetime
-  import email.utils
+  smtp_auth_email = creds.mailpal_email or f"{creds.client_id}@mailpal.com"
+  smtp_auth_password = creds.mailpal_app_password
+  if not smtp_auth_password:
+    raise NotEnrolledError(
+      "No MailPal app_password found in stored credentials. "
+      "Call oneid.mailpal.activate() first to create a MailPal account "
+      "and store SMTP credentials, or manually add mailpal_app_password "
+      "to credentials.json."
+    )
 
-  rfc2822_date = email.utils.formatdate(localtime=True)
-  generated_message_id = email.utils.make_msgid(domain="mailpal.com")
-
-  email_headers_for_attestation_nonce: Dict[str, str] = {
-    "From": effective_from,
-    "To": ", ".join(to),
-    "Subject": subject,
-    "Date": rfc2822_date,
-    "Message-ID": generated_message_id,
-  }
-
-  effective_body_bytes = (text_body or html_body or "").encode("utf-8")
-
-  proof = None
-  direct_attestation_proof = None
+  parsed_from_display_name, parsed_from_email = email.utils.parseaddr(from_address or "")
+  effective_from_email = parsed_from_email or smtp_auth_email
+  effective_from_display_name = from_display_name or parsed_from_display_name or creds.display_name or ""
 
   if attestation_mode == "none":
     include_attestation = False
+
+  # -- Phase 1: Build MIME message locally --
+  mime_message = email.message.EmailMessage(policy=email.policy.SMTP)
+  mime_message["From"] = email.utils.formataddr((effective_from_display_name, effective_from_email))
+  mime_message["To"] = ", ".join(to)
+  mime_message["Subject"] = subject
+  mime_message["Date"] = email.utils.formatdate(localtime=True)
+  mime_message["Message-ID"] = email.utils.make_msgid(domain="mailpal.com")
+  if cc:
+    mime_message["Cc"] = ", ".join(cc)
+
+  if text_body and html_body:
+    mime_message.set_content(text_body)
+    mime_message.add_alternative(html_body, subtype="html")
+  elif html_body:
+    mime_message.set_content(html_body, subtype="html")
+  else:
+    mime_message.set_content(text_body or "")
+
+  wire_format_message_bytes = mime_message.as_bytes()
+
+  # -- Phase 2: Parse wire bytes to extract headers identically to milter --
+  parsed_wire_message = email_stdlib.message_from_bytes(
+    wire_format_message_bytes, policy=email.policy.compat32,
+  )
+
+  _MODE2_REQUIRED_HEADER_NAMES = {"from", "to", "subject", "date", "message-id"}
+  wire_format_headers_for_mode2_nonce = {}
+  for header_name_key in _MODE2_REQUIRED_HEADER_NAMES:
+    header_value_from_wire = parsed_wire_message[header_name_key]
+    if header_value_from_wire is not None:
+      wire_format_headers_for_mode2_nonce[header_name_key] = header_value_from_wire
+
+  wire_format_all_headers_for_mode1 = {}
+  for raw_header_name in parsed_wire_message.keys():
+    lowered_header_name = raw_header_name.strip().lower()
+    if lowered_header_name not in wire_format_all_headers_for_mode1:
+      wire_format_all_headers_for_mode1[lowered_header_name] = parsed_wire_message[raw_header_name]
+
+  header_body_separator_position = wire_format_message_bytes.find(b"\r\n\r\n")
+  wire_format_body_bytes = (
+    wire_format_message_bytes[header_body_separator_position + 4:]
+    if header_body_separator_position >= 0 else b""
+  )
+
+  # -- Phase 3: Compute attestation from wire-format bytes --
+  mode2_sd_jwt_proof = None
+  mode1_direct_attestation_proof = None
 
   if include_attestation:
     include_sd_jwt_mode = attestation_mode in ("sd-jwt", "both")
     include_direct_mode = attestation_mode in ("direct", "both")
 
     if include_sd_jwt_mode:
-      proof = prepare_attestation(
-        email_headers=email_headers_for_attestation_nonce,
-        body=effective_body_bytes,
+      mode2_sd_jwt_proof = prepare_attestation(
+        email_headers=wire_format_headers_for_mode2_nonce,
+        body=wire_format_body_bytes,
         disclosed_claims=disclosed_claims,
         api_base_url=oneid_api_url,
       )
@@ -286,68 +398,81 @@ def send(
     if include_direct_mode:
       try:
         from .attestation import prepare_direct_hardware_attestation
-        direct_attestation_proof = prepare_direct_hardware_attestation(
-          email_headers=email_headers_for_attestation_nonce,
-          body=effective_body_bytes,
+        mode1_direct_attestation_proof = prepare_direct_hardware_attestation(
+          email_headers=wire_format_all_headers_for_mode1,
+          body=wire_format_body_bytes,
         )
       except (NotEnrolledError, ValueError) as mode1_error:
         logger.info("Mode 1 (direct) attestation skipped: %s", mode1_error)
 
-  send_body: Dict[str, Any] = {
-    "to": to,
-    "subject": subject,
-    "text": text_body or "",
-  }
-  if html_body:
-    send_body["html"] = html_body
-  if effective_from:
-    send_body["from"] = effective_from
-  if from_display_name:
-    send_body["from_display_name"] = from_display_name
-  if cc:
-    send_body["cc"] = cc
-  if bcc:
-    send_body["bcc"] = bcc
+  # -- Phase 4: Build attestation header lines for injection --
+  attestation_header_lines_to_inject: List[str] = []
 
-  send_body["date"] = rfc2822_date
-  send_body["message_id"] = generated_message_id
+  if mode2_sd_jwt_proof:
+    if mode2_sd_jwt_proof.sd_jwt:
+      sd_jwt_presentation_value = mode2_sd_jwt_proof.sd_jwt
+      if mode2_sd_jwt_proof.sd_jwt_disclosures:
+        for disclosure_b64url in mode2_sd_jwt_proof.sd_jwt_disclosures.values():
+          sd_jwt_presentation_value += "~" + disclosure_b64url
+        sd_jwt_presentation_value += "~"
+      attestation_header_lines_to_inject.append(
+        _fold_long_header_value_for_smtp_transmission("Hardware-Trust-Proof", sd_jwt_presentation_value)
+      )
+    if mode2_sd_jwt_proof.contact_token:
+      attestation_header_lines_to_inject.append(
+        f"X-1ID-Contact-Token: {mode2_sd_jwt_proof.contact_token}"
+      )
 
-  custom_headers = {}
-  if proof:
-    if proof.sd_jwt:
-      custom_headers["Hardware-Trust-Proof"] = proof.sd_jwt
-    if proof.contact_token:
-      custom_headers["X-1ID-Contact-Token"] = proof.contact_token
-  if direct_attestation_proof:
-    if direct_attestation_proof.hardware_attestation_header_value:
-      custom_headers["Hardware-Attestation"] = direct_attestation_proof.hardware_attestation_header_value
-  if custom_headers:
-    send_body["custom_headers"] = custom_headers
+  if mode1_direct_attestation_proof and mode1_direct_attestation_proof.hardware_attestation_header_value:
+    attestation_header_lines_to_inject.append(
+      _fold_long_header_value_for_smtp_transmission(
+        "Hardware-Attestation", mode1_direct_attestation_proof.hardware_attestation_header_value,
+      )
+    )
 
-  url = f"{mailpal_api_url or _MAILPAL_API_BASE_URL}/api/v1/send"
+  # -- Phase 5: Inject attestation headers into wire bytes --
+  if attestation_header_lines_to_inject and header_body_separator_position >= 0:
+    headers_section = wire_format_message_bytes[:header_body_separator_position]
+    body_and_separator_tail = wire_format_message_bytes[header_body_separator_position:]
+    injected_header_bytes = ("\r\n".join(attestation_header_lines_to_inject)).encode("utf-8")
+    final_message_bytes = headers_section + b"\r\n" + injected_header_bytes + body_and_separator_tail
+  else:
+    final_message_bytes = wire_format_message_bytes
+
+  # -- Phase 6: Submit via SMTP with STARTTLS + app_password auth --
+  effective_smtp_host = smtp_host or _SMTP_HOST
+  effective_smtp_port = smtp_port or _SMTP_PORT_STARTTLS
+
+  envelope_recipients = _extract_all_envelope_recipient_addresses(to, cc, bcc)
+  if not envelope_recipients:
+    raise ValueError("No valid recipient email addresses found in to/cc/bcc.")
 
   try:
-    with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
-      response = client.post(url, json=send_body, headers=_get_auth_headers())
-  except httpx.ConnectError as error:
-    raise NetworkError(f"Could not connect to MailPal: {error}") from error
-  except httpx.TimeoutException as error:
-    raise NetworkError(f"MailPal send timed out: {error}") from error
+    with smtplib.SMTP(effective_smtp_host, effective_smtp_port, timeout=_SMTP_TIMEOUT_SECONDS) as smtp_connection:
+      smtp_connection.ehlo()
+      smtp_connection.starttls()
+      smtp_connection.ehlo()
+      smtp_connection.login(smtp_auth_email, smtp_auth_password)
+      smtp_connection.sendmail(smtp_auth_email, envelope_recipients, final_message_bytes)
+  except smtplib.SMTPAuthenticationError as smtp_auth_error:
+    raise AuthenticationError(
+      f"SMTP authentication failed for {smtp_auth_email}: {smtp_auth_error}"
+    ) from smtp_auth_error
+  except (smtplib.SMTPException, OSError) as smtp_error:
+    raise NetworkError(f"SMTP submission failed: {smtp_error}") from smtp_error
 
-  if response.status_code == 401:
-    raise AuthenticationError("Bearer token rejected by MailPal.")
-  if response.status_code != 200:
-    raise NetworkError(f"MailPal send failed (HTTP {response.status_code}): {response.text[:200]}")
-
-  data = response.json().get("data", {})
+  generated_message_id = mime_message["Message-ID"]
 
   return SendResult(
-    message_id=data.get("message_id"),
-    from_address=data.get("from"),
-    attestation_headers_included=proof is not None or direct_attestation_proof is not None,
-    contact_token_header_included=proof is not None and proof.contact_token is not None,
-    sd_jwt_header_included=proof is not None and proof.sd_jwt is not None,
-    direct_attestation_header_included=direct_attestation_proof is not None and direct_attestation_proof.hardware_attestation_header_value is not None,
+    message_id=generated_message_id,
+    from_address=effective_from_email,
+    attestation_headers_included=mode2_sd_jwt_proof is not None or mode1_direct_attestation_proof is not None,
+    contact_token_header_included=mode2_sd_jwt_proof is not None and mode2_sd_jwt_proof.contact_token is not None,
+    sd_jwt_header_included=mode2_sd_jwt_proof is not None and mode2_sd_jwt_proof.sd_jwt is not None,
+    direct_attestation_header_included=(
+      mode1_direct_attestation_proof is not None
+      and mode1_direct_attestation_proof.hardware_attestation_header_value is not None
+    ),
   )
 
 
