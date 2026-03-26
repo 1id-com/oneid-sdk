@@ -98,19 +98,24 @@ def canonicalise_headers_for_direct_attestation(
         f"Required headers: {_MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING}"
       )
 
-  canonicalised_header_lines = []
-  for required_header_name in _MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING:
-    canon_name = canonicalise_header_name_using_dkim_relaxed(required_header_name)
-    canon_value = canonicalise_header_value_using_dkim_relaxed(lowered_headers[required_header_name])
-    canonicalised_header_lines.append(f"{canon_name}:{canon_value}\r\n")
+  all_header_names = list(_MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING)
+  extra_names = sorted(
+    h for h in lowered_headers
+    if h not in _MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING
+    and h not in ("hardware-attestation", "hardware-trust-proof")
+  )
+  all_header_names.extend(extra_names)
+  all_header_names = all_header_names + list(all_header_names)
 
-  for extra_header_name in sorted(lowered_headers.keys()):
-    if extra_header_name in _MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING:
+  message_header_pairs = list(lowered_headers.items())
+  selected = _select_headers_bottom_up_per_dkim(all_header_names, message_header_pairs)
+
+  canonicalised_header_lines = []
+  for entry in selected:
+    if entry is None:
       continue
-    if extra_header_name in ("hardware-attestation", "hardware-trust-proof"):
-      continue
-    canon_name = canonicalise_header_name_using_dkim_relaxed(extra_header_name)
-    canon_value = canonicalise_header_value_using_dkim_relaxed(lowered_headers[extra_header_name])
+    canon_name = canonicalise_header_name_using_dkim_relaxed(entry[0])
+    canon_value = canonicalise_header_value_using_dkim_relaxed(entry[1])
     canonicalised_header_lines.append(f"{canon_name}:{canon_value}\r\n")
 
   self_referencing_attestation_line = f"hardware-attestation:{hardware_attestation_header_value_without_chain}"
@@ -358,15 +363,15 @@ def prepare_direct_hardware_attestation(
   bh_raw = hashlib.sha256(canonicalised_body).digest()
   bh_base64url = base64.urlsafe_b64encode(bh_raw).rstrip(b"=").decode("ascii")
 
-  signed_header_names = ":".join(_MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING)
   lowered_headers = {k.strip().lower(): v for k, v in email_headers.items()}
+  all_signed_names = list(_MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING)
   extra_header_names = sorted(
     h for h in lowered_headers
     if h not in _MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING
     and h not in ("hardware-attestation", "hardware-trust-proof")
   )
-  if extra_header_names:
-    signed_header_names += ":" + ":".join(extra_header_names)
+  all_signed_names.extend(extra_header_names)
+  signed_header_names = ":".join(all_signed_names) + ":" + ":".join(all_signed_names)
 
   if trust_tier in ("sovereign", "virtual") or creds.key_algorithm == "tpm-ak":
     algorithm_for_header = "RS256"
@@ -434,13 +439,14 @@ def prepare_direct_hardware_attestation(
 def canonicalise_header_value_using_dkim_relaxed(raw_value: str) -> str:
   """RFC 6376 Section 3.4.2 relaxed header canonicalization (value part only).
 
+  Pre-step: Normalize all line endings to CRLF.
   1. Unfold header continuation lines (CRLF followed by WSP).
   2. Compress each sequence of WSP to a single SP.
-  3. Strip trailing WSP before the CRLF.
+  3. Strip leading/trailing WSP.
   """
-  unfolded = raw_value.replace("\r\n ", " ").replace("\r\n\t", " ")
-  unfolded = unfolded.replace("\n ", " ").replace("\n\t", " ")
   import re
+  normalized = raw_value.replace("\r\n", "\n").replace("\n", "\r\n")
+  unfolded = re.sub(r"\r\n[ \t]", " ", normalized)
   compressed = re.sub(r"[ \t]+", " ", unfolded)
   return compressed.strip()
 
@@ -448,6 +454,36 @@ def canonicalise_header_value_using_dkim_relaxed(raw_value: str) -> str:
 def canonicalise_header_name_using_dkim_relaxed(raw_name: str) -> str:
   """RFC 6376 Section 3.4.2: header field names are lowercased."""
   return raw_name.strip().lower()
+
+
+def _select_headers_bottom_up_per_dkim(
+  header_names_from_h_tag: List[str],
+  message_headers: List[tuple],
+) -> List[Optional[tuple]]:
+  """Select header instances per DKIM RFC 6376 Section 3.7 bottom-up rule.
+
+  For each name in header_names_from_h_tag (left to right), scan
+  message_headers from bottom to top and consume the bottommost unused
+  instance. If no unused instance remains, return None for that slot
+  (absent header -- contributes zero bytes to the hash).
+  """
+  consumed_indices: set = set()
+  selected: List[Optional[tuple]] = []
+  for requested_name in header_names_from_h_tag:
+    target = requested_name.strip().lower()
+    found_index = -1
+    for i in range(len(message_headers) - 1, -1, -1):
+      if i in consumed_indices:
+        continue
+      if message_headers[i][0].strip().lower() == target:
+        found_index = i
+        break
+    if found_index >= 0:
+      consumed_indices.add(found_index)
+      selected.append(message_headers[found_index])
+    else:
+      selected.append(None)
+  return selected
 
 
 def canonicalise_headers_for_message_binding(
@@ -471,19 +507,18 @@ def canonicalise_headers_for_message_binding(
         f"Required headers: {_MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING}"
       )
 
-  canonicalised_header_lines = []
-  for required_header_name in _MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING:
-    canon_name = canonicalise_header_name_using_dkim_relaxed(required_header_name)
-    canon_value = canonicalise_header_value_using_dkim_relaxed(lowered_headers[required_header_name])
-    canonicalised_header_lines.append(f"{canon_name}:{canon_value}\r\n")
+  header_names_for_nonce = list(_MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING)
+  header_names_for_nonce = header_names_for_nonce + list(header_names_for_nonce)
 
-  for extra_header_name in sorted(lowered_headers.keys()):
-    if extra_header_name in _MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING:
+  message_header_pairs = list(lowered_headers.items())
+  selected = _select_headers_bottom_up_per_dkim(header_names_for_nonce, message_header_pairs)
+
+  canonicalised_header_lines = []
+  for entry in selected:
+    if entry is None:
       continue
-    if extra_header_name == "hardware-trust-proof":
-      continue
-    canon_name = canonicalise_header_name_using_dkim_relaxed(extra_header_name)
-    canon_value = canonicalise_header_value_using_dkim_relaxed(lowered_headers[extra_header_name])
+    canon_name = canonicalise_header_name_using_dkim_relaxed(entry[0])
+    canon_value = canonicalise_header_value_using_dkim_relaxed(entry[1])
     canonicalised_header_lines.append(f"{canon_name}:{canon_value}\r\n")
 
   hardware_trust_proof_line = f"hardware-trust-proof:{hardware_trust_proof_header_value_placeholder}"
@@ -495,12 +530,13 @@ def canonicalise_headers_for_message_binding(
 def canonicalise_body_using_dkim_simple(body_bytes: bytes) -> bytes:
   """RFC 6376 Section 3.4.3 simple body canonicalization.
 
-  The body is left as-is except that trailing empty lines (CRLF sequences
-  at the very end) are removed. If the body is non-empty and does not end
-  with CRLF, a single CRLF is appended.
+  Pre-step: Normalize all line endings to CRLF.
+  Then: trailing empty lines (CRLF sequences at the very end) are removed.
+  If the body is non-empty and does not end with CRLF, a single CRLF is appended.
   """
   if not body_bytes:
     return b"\r\n"
+  body_bytes = body_bytes.replace(b"\r\n", b"\n").replace(b"\r", b"\n").replace(b"\n", b"\r\n")
   while body_bytes.endswith(b"\r\n\r\n"):
     body_bytes = body_bytes[:-2]
   if not body_bytes.endswith(b"\r\n"):

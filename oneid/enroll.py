@@ -663,6 +663,7 @@ def _enroll_enclave_tier(
   """
   from .helper import (
     detect_available_hsms,
+    extract_attestation_data,
     sign_challenge_with_enclave,
   )
 
@@ -682,7 +683,8 @@ def _enroll_enclave_tier(
       "or a T2-equipped Mac with CryptoKit support."
     )
 
-  enclave_public_key_pem = enclave_hsm.get("public_key_pem", "")
+  enclave_extract_result = extract_attestation_data(enclave_hsm)
+  enclave_public_key_pem = enclave_extract_result.get("public_key_pem", "")
   if not enclave_public_key_pem:
     raise EnrollmentError(
       "Secure Enclave detected but no public key was returned. "

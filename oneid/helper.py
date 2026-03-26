@@ -429,7 +429,7 @@ def extract_attestation_data(hsm: dict) -> dict:
   """
   hsm_type = hsm.get("type", "tpm")
   args = ["--type", hsm_type]
-  if hsm_type not in ("yubikey", "piv"):
+  if hsm_type not in ("yubikey", "piv", "enclave", "secure_enclave"):
     args.append("--elevated")
   return _run_binary_command("extract", args=args)
 

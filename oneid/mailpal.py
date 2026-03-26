@@ -228,7 +228,7 @@ def _fold_long_header_value_for_smtp_transmission(header_name: str, header_value
   """Fold a header into continuation lines per RFC 5322 Section 2.2.3.
 
   Long attestation headers (SD-JWT, CMS chain) can exceed the 998-character
-  hard limit. This function folds at 76-char boundaries using CRLF + SP
+  hard limit. This function folds at 76-char boundaries using CRLF + HTAB
   continuation, which the milter unfolds before verification.
   """
   full_line = f"{header_name}: {header_value}"
@@ -239,7 +239,7 @@ def _fold_long_header_value_for_smtp_transmission(header_name: str, header_value
   lines = [first_line]
   while remaining:
     chunk = remaining[:75]
-    lines.append(" " + chunk)
+    lines.append("\t" + chunk)
     remaining = remaining[75:]
   return "\r\n".join(lines)
 
@@ -273,6 +273,8 @@ def send(
   oneid_api_url: Optional[str] = None,
   smtp_host: Optional[str] = None,
   smtp_port: Optional[int] = None,
+  smtp_username: Optional[str] = None,
+  smtp_password: Optional[str] = None,
 ) -> SendResult:
   """
   Send an attested email via direct SMTP submission to smtp.mailpal.com.
@@ -312,24 +314,30 @@ def send(
     oneid_api_url: Override the 1id.com API URL.
     smtp_host: Override SMTP host (default: smtp.mailpal.com).
     smtp_port: Override SMTP port (default: 587/STARTTLS).
+    smtp_username: Override SMTP auth username (default: stored mailpal_email).
+        Use this to send from a different Stalwart account (e.g.
+        alice@example.un.ag) while still using the agent's 1id identity
+        for attestation signing.
+    smtp_password: Override SMTP auth password. Required when smtp_username
+        is set. This is the Stalwart app_password for the account being
+        sent from.
 
   Returns:
     SendResult with message_id and attestation details.
   """
   creds = load_credentials()
 
-  smtp_auth_email = creds.mailpal_email or f"{creds.client_id}@mailpal.com"
-  smtp_auth_password = creds.mailpal_app_password
-  if not smtp_auth_password:
+  effective_smtp_auth_username = smtp_username or creds.mailpal_email or f"{creds.client_id}@mailpal.com"
+  effective_smtp_auth_password = smtp_password or creds.mailpal_app_password
+  if not effective_smtp_auth_password:
     raise NotEnrolledError(
-      "No MailPal app_password found in stored credentials. "
-      "Call oneid.mailpal.activate() first to create a MailPal account "
-      "and store SMTP credentials, or manually add mailpal_app_password "
-      "to credentials.json."
+      "No SMTP password available. Either pass smtp_password explicitly, "
+      "or call oneid.mailpal.activate() first to store SMTP credentials, "
+      "or manually add mailpal_app_password to credentials.json."
     )
 
   parsed_from_display_name, parsed_from_email = email.utils.parseaddr(from_address or "")
-  effective_from_email = parsed_from_email or smtp_auth_email
+  effective_from_email = parsed_from_email or effective_smtp_auth_username
   effective_from_display_name = from_display_name or parsed_from_display_name or creds.display_name or ""
 
   if attestation_mode == "none":
@@ -388,12 +396,15 @@ def send(
     include_direct_mode = attestation_mode in ("direct", "both")
 
     if include_sd_jwt_mode:
-      mode2_sd_jwt_proof = prepare_attestation(
-        email_headers=wire_format_headers_for_mode2_nonce,
-        body=wire_format_body_bytes,
-        disclosed_claims=disclosed_claims,
-        api_base_url=oneid_api_url,
-      )
+      try:
+        mode2_sd_jwt_proof = prepare_attestation(
+          email_headers=wire_format_headers_for_mode2_nonce,
+          body=wire_format_body_bytes,
+          disclosed_claims=disclosed_claims,
+          api_base_url=oneid_api_url,
+        )
+      except Exception as mode2_error:
+        logger.warning("Mode 2 (SD-JWT) attestation failed: %s", mode2_error)
 
     if include_direct_mode:
       try:
@@ -402,8 +413,8 @@ def send(
           email_headers=wire_format_all_headers_for_mode1,
           body=wire_format_body_bytes,
         )
-      except (NotEnrolledError, ValueError) as mode1_error:
-        logger.info("Mode 1 (direct) attestation skipped: %s", mode1_error)
+      except Exception as mode1_error:
+        logger.warning("Mode 1 (direct) attestation failed: %s", mode1_error)
 
   # -- Phase 4: Build attestation header lines for injection --
   attestation_header_lines_to_inject: List[str] = []
@@ -452,11 +463,11 @@ def send(
       smtp_connection.ehlo()
       smtp_connection.starttls()
       smtp_connection.ehlo()
-      smtp_connection.login(smtp_auth_email, smtp_auth_password)
-      smtp_connection.sendmail(smtp_auth_email, envelope_recipients, final_message_bytes)
+      smtp_connection.login(effective_smtp_auth_username, effective_smtp_auth_password)
+      smtp_connection.sendmail(effective_from_email, envelope_recipients, final_message_bytes)
   except smtplib.SMTPAuthenticationError as smtp_auth_error:
     raise AuthenticationError(
-      f"SMTP authentication failed for {smtp_auth_email}: {smtp_auth_error}"
+      f"SMTP authentication failed for {effective_smtp_auth_username}: {smtp_auth_error}"
     ) from smtp_auth_error
   except (smtplib.SMTPException, OSError) as smtp_error:
     raise NetworkError(f"SMTP submission failed: {smtp_error}") from smtp_error
