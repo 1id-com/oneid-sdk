@@ -814,10 +814,42 @@ def sign_challenge_with_piv(nonce_b64: str) -> dict:
   return output
 
 
+def _find_secure_enclave_helper_binary() -> Path | None:
+  """Locate the oneid-se-helper binary (macOS only).
+
+  Search order:
+    1. Alongside oneid-enroll in ~/.oneid/bin/
+    2. In PATH
+  """
+  se_helper_name = "oneid-se-helper"
+
+  cache_dir = _get_binary_cache_dir()
+  cached_path = cache_dir / se_helper_name
+  if cached_path.exists() and os.access(str(cached_path), os.X_OK):
+    return cached_path
+
+  main_binary = find_binary()
+  if main_binary is not None:
+    sibling_path = main_binary.parent / se_helper_name
+    if sibling_path.exists() and os.access(str(sibling_path), os.X_OK):
+      return sibling_path
+
+  import shutil
+  path_binary = shutil.which(se_helper_name)
+  if path_binary:
+    return Path(path_binary)
+
+  return None
+
+
+_ENCLAVE_DEFAULT_KEY_TAG = "com.1id.enclave.default"
+
+
 def sign_challenge_with_enclave(nonce_b64: str) -> dict:
   """Sign a challenge nonce using the Apple Secure Enclave -- NO ELEVATION NEEDED.
 
-  Uses the P-256 key stored in the Secure Enclave via the Go binary.
+  Uses the P-256 key stored in the Secure Enclave via the oneid-se-helper
+  Swift binary (NOT oneid-enroll, which does not support enclave signing).
   Only available on macOS with Apple Silicon or T2 security chip.
 
   Args:
@@ -833,13 +865,48 @@ def sign_challenge_with_enclave(nonce_b64: str) -> dict:
       NoHSMError: If Secure Enclave is not available.
       HSMAccessError: If signing fails.
   """
-  output = _run_binary_command(
-    "sign",
-    args=[
-      "--nonce", nonce_b64,
-      "--type", "enclave",
-    ],
-  )
+  se_helper_path = _find_secure_enclave_helper_binary()
+  if se_helper_path is None:
+    raise NoHSMError(
+      "oneid-se-helper binary not found. "
+      "It should be in ~/.oneid/bin/ alongside oneid-enroll."
+    )
+
+  cmd = [
+    str(se_helper_path), "sign",
+    "--tag", _ENCLAVE_DEFAULT_KEY_TAG,
+    "--nonce", nonce_b64,
+  ]
+  logger.debug("Running SE helper: %s", " ".join(cmd))
+
+  try:
+    result = subprocess.run(
+      cmd,
+      capture_output=True,
+      text=True,
+      timeout=30.0,
+    )
+  except subprocess.TimeoutExpired:
+    raise HSMAccessError("oneid-se-helper sign timed out after 30s")
+  except FileNotFoundError:
+    raise NoHSMError(f"oneid-se-helper binary not found at {se_helper_path}")
+
+  if result.returncode != 0:
+    error_text = result.stderr.strip() or result.stdout.strip()
+    raise HSMAccessError(f"oneid-se-helper sign failed: {error_text}")
+
+  try:
+    output = json.loads(result.stdout)
+  except json.JSONDecodeError as json_error:
+    raise HSMAccessError(
+      f"oneid-se-helper returned invalid JSON: {json_error}"
+    ) from json_error
+
+  if output.get("status") != "ok":
+    raise HSMAccessError(
+      f"oneid-se-helper sign returned error: {output.get('error', 'unknown')}"
+    )
+
   return output
 
 

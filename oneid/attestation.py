@@ -675,12 +675,25 @@ def prepare_attestation(
         bytes.fromhex(message_hash)
       ).rstrip(b"=").decode("ascii")
 
+    hsm_ref = getattr(creds, "hsm_key_reference", None) or ""
+    if hsm_ref.startswith("piv-"):
+      session_device_type_for_dynamic_trust_tiering = "piv"
+    elif hsm_ref == "secure-enclave":
+      session_device_type_for_dynamic_trust_tiering = "enclave"
+    elif creds.trust_tier == "virtual":
+      session_device_type_for_dynamic_trust_tiering = "vtpm"
+    elif creds.key_algorithm == "tpm-ak":
+      session_device_type_for_dynamic_trust_tiering = "tpm"
+    else:
+      session_device_type_for_dynamic_trust_tiering = None
+
     proof.sd_jwt, proof.sd_jwt_disclosures = _fetch_sd_jwt_proof_for_message(
       api_base_url=api_base_url,
       auth_headers=auth_headers,
       precomputed_nonce=nonce_value,
       proposed_iat=proposed_iat,
       disclosed_claims=disclosed_claims,
+      session_device_type=session_device_type_for_dynamic_trust_tiering,
     )
 
   if include_contact_token:
@@ -698,6 +711,7 @@ def _fetch_sd_jwt_proof_for_message(
   precomputed_nonce: str,
   proposed_iat: int,
   disclosed_claims: List[str],
+  session_device_type: Optional[str] = None,
 ) -> tuple:
   """Fetch a per-message SD-JWT proof from the issuer.
 
@@ -706,6 +720,10 @@ def _fetch_sd_jwt_proof_for_message(
 
   The nonce is pre-computed by the caller (either RFC message-binding
   or simple content hash) and passed as a base64url string.
+
+  When session_device_type is provided, the server uses it for dynamic
+  trust tiering -- the SD-JWT trust_tier claim reflects the device used
+  for this specific session rather than the identity's enrolled tier.
   """
   url = f"{api_base_url}/api/v1/proof/sd-jwt/message"
   body: Dict[str, Any] = {
@@ -713,6 +731,8 @@ def _fetch_sd_jwt_proof_for_message(
     "proposed_iat": proposed_iat,
     "disclosed_claims": disclosed_claims,
   }
+  if session_device_type:
+    body["device_type"] = session_device_type
 
   try:
     with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:

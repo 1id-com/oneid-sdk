@@ -2,8 +2,8 @@
 OAuth2 token management for the 1id.com SDK.
 
 After enrollment, agents authenticate via hardware challenge-response
-(TPM for sovereign/virtual, PIV for portable) or OAuth2 client_credentials
-grant (declared tier only).
+(TPM for sovereign/virtual, PIV for portable, Secure Enclave for enclave)
+or OAuth2 client_credentials grant (declared tier only).
 
 SECURITY RULE: Hardware-tier identities NEVER fall back to bare
 client_credentials. If the hardware device is absent, get_token() raises
@@ -140,6 +140,19 @@ def _authenticate_with_hardware_challenge_response(credentials: StoredCredential
         f"{credentials.trust_tier} tier. Device may be absent or "
         f"inaccessible: {tpm_error}"
       ) from tpm_error
+
+  if credentials.trust_tier in _TIERS_USING_ENCLAVE:
+    try:
+      logger.debug("Attempting Secure Enclave passwordless authentication...")
+      return authenticate_with_enclave(credentials=credentials)
+    except HardwareDeviceNotPresentError:
+      raise
+    except Exception as enclave_error:
+      raise HardwareDeviceNotPresentError(
+        f"Secure Enclave authentication failed and hardware is required for "
+        f"{credentials.trust_tier} tier. Enclave may be absent or "
+        f"inaccessible: {enclave_error}"
+      ) from enclave_error
 
   raise HardwareDeviceNotPresentError(
     f"Trust tier '{credentials.trust_tier}' requires hardware but no "
@@ -537,5 +550,145 @@ def authenticate_with_piv(
   else:
     raise AuthenticationError(
       "PIV signature verified but no tokens were issued. "
+      "The Keycloak token endpoint may be unavailable."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Secure Enclave passwordless authentication (enclave tier)
+# ---------------------------------------------------------------------------
+
+def authenticate_with_enclave(
+  identity_id: str | None = None,
+  api_base_url: str | None = None,
+  credentials: StoredCredentials | None = None,
+) -> Token:
+  """Authenticate using the Apple Secure Enclave -- passwordless sign-in.
+
+  Same challenge-response flow as TPM/PIV but uses the P-256 key stored
+  in the Secure Enclave via the oneid-se-helper binary.
+
+  Args:
+      identity_id: The 1id internal ID. If None, loaded from credentials.
+      api_base_url: Base URL for the 1id API. If None, loaded from credentials.
+      credentials: Pre-loaded credentials. If None, loaded from file.
+
+  Returns:
+      A valid Token object.
+
+  Raises:
+      NotEnrolledError: If no credentials file exists.
+      AuthenticationError: If the challenge-response fails.
+      NetworkError: If the server cannot be reached.
+  """
+  global _cached_token
+
+  if credentials is None:
+    credentials = load_credentials()
+
+  if identity_id is None:
+    identity_id = credentials.client_id
+
+  if api_base_url is None:
+    api_base_url = credentials.api_base_url
+
+  challenge_url = f"{api_base_url}/api/v1/auth/challenge"
+
+  try:
+    with httpx.Client(timeout=TOKEN_REQUEST_TIMEOUT_SECONDS) as http_client:
+      challenge_response = http_client.post(
+        challenge_url,
+        json={"identity_id": identity_id, "device_type": "enclave"},
+        headers={"User-Agent": USER_AGENT},
+      )
+  except httpx.ConnectError as connection_error:
+    raise NetworkError(
+      f"Could not connect to {challenge_url}: {connection_error}"
+    ) from connection_error
+  except httpx.TimeoutException as timeout_error:
+    raise NetworkError(
+      f"Challenge request to {challenge_url} timed out: {timeout_error}"
+    ) from timeout_error
+
+  if challenge_response.status_code != 200:
+    try:
+      error_body = challenge_response.json()
+      error_msg = error_body.get("error", {}).get("message", f"HTTP {challenge_response.status_code}")
+    except Exception:
+      error_msg = f"HTTP {challenge_response.status_code}"
+    raise AuthenticationError(f"Challenge request failed: {error_msg}")
+
+  challenge_data = challenge_response.json().get("data", {})
+  challenge_id = challenge_data.get("challenge_id")
+  nonce_b64 = challenge_data.get("nonce_b64")
+
+  if not challenge_id or not nonce_b64:
+    raise AuthenticationError("Server returned incomplete challenge response")
+
+  logger.debug("Received enclave auth challenge: %s", challenge_id)
+
+  from .helper import sign_challenge_with_enclave
+
+  sign_result = sign_challenge_with_enclave(nonce_b64=nonce_b64)
+  signature_b64 = sign_result.get("signature_b64", "")
+
+  if not signature_b64:
+    raise AuthenticationError("Secure Enclave signing returned empty signature")
+
+  logger.debug("Enclave nonce signed successfully, verifying with server...")
+
+  verify_url = f"{api_base_url}/api/v1/auth/verify"
+
+  try:
+    with httpx.Client(timeout=TOKEN_REQUEST_TIMEOUT_SECONDS) as http_client:
+      verify_response = http_client.post(
+        verify_url,
+        json={
+          "challenge_id": challenge_id,
+          "signature_b64": signature_b64,
+        },
+        headers={"User-Agent": USER_AGENT},
+      )
+  except httpx.ConnectError as connection_error:
+    raise NetworkError(
+      f"Could not connect to {verify_url}: {connection_error}"
+    ) from connection_error
+  except httpx.TimeoutException as timeout_error:
+    raise NetworkError(
+      f"Verify request to {verify_url} timed out: {timeout_error}"
+    ) from timeout_error
+
+  if verify_response.status_code != 200:
+    try:
+      error_body = verify_response.json()
+      error_msg = error_body.get("error", {}).get("message", f"HTTP {verify_response.status_code}")
+    except Exception:
+      error_msg = f"HTTP {verify_response.status_code}"
+    raise AuthenticationError(f"Secure Enclave authentication failed: {error_msg}")
+
+  verify_data = verify_response.json().get("data", {})
+
+  if not verify_data.get("authenticated"):
+    raise AuthenticationError("Server did not confirm Secure Enclave authentication")
+
+  tokens = verify_data.get("tokens")
+  if tokens and tokens.get("access_token"):
+    expires_in_seconds = tokens.get("expires_in", 3600)
+    token = Token(
+      access_token=tokens["access_token"],
+      token_type=tokens.get("token_type", "Bearer"),
+      expires_at=datetime.now(timezone.utc) + timedelta(seconds=expires_in_seconds),
+      refresh_token=tokens.get("refresh_token"),
+    )
+    _cached_token = token
+    logger.info(
+      "Secure Enclave authentication successful for %s (handle: %s)",
+      identity_id,
+      verify_data.get("identity", {}).get("handle", "?"),
+    )
+    return token
+  else:
+    raise AuthenticationError(
+      "Secure Enclave signature verified but no tokens were issued. "
       "The Keycloak token endpoint may be unavailable."
     )
