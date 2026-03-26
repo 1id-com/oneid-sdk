@@ -373,10 +373,10 @@ def prepare_direct_hardware_attestation(
   all_signed_names.extend(extra_header_names)
   signed_header_names = ":".join(all_signed_names) + ":" + ":".join(all_signed_names)
 
-  if trust_tier in ("sovereign", "virtual") or creds.key_algorithm == "tpm-ak":
-    algorithm_for_header = "RS256"
-  elif trust_tier in ("portable", "enclave") or creds.hsm_key_reference == "piv-slot-9a":
+  if trust_tier == "portable" or trust_tier == "enclave":
     algorithm_for_header = "ES256"
+  elif trust_tier in ("sovereign", "virtual") or creds.key_algorithm == "tpm-ak":
+    algorithm_for_header = "RS256"
   elif creds.private_key_pem:
     algo_name = _determine_signing_algorithm_name(creds)
     algorithm_for_header = algo_name
@@ -400,13 +400,13 @@ def prepare_direct_hardware_attestation(
     hardware_attestation_header_value_without_chain=header_template_without_chain_with_aid,
   )
 
-  if trust_tier in ("sovereign", "virtual") or creds.key_algorithm == "tpm-ak":
-    ak_handle = creds.hsm_key_reference or ""
-    signature_bytes, resolved_algorithm = _sign_with_tpm(attestation_digest, ak_handle)
-  elif trust_tier == "portable" or creds.hsm_key_reference == "piv-slot-9a":
+  if trust_tier == "portable":
     signature_bytes, resolved_algorithm = _sign_with_piv(attestation_digest)
   elif trust_tier == "enclave":
     signature_bytes, resolved_algorithm = _sign_with_enclave(attestation_digest)
+  elif trust_tier in ("sovereign", "virtual") or creds.key_algorithm == "tpm-ak":
+    ak_handle = creds.hsm_key_reference or ""
+    signature_bytes, resolved_algorithm = _sign_with_tpm(attestation_digest, ak_handle)
   elif creds.private_key_pem:
     signature_bytes = _sign_with_software_key(attestation_digest, creds.private_key_pem)
     resolved_algorithm = algorithm_for_header
