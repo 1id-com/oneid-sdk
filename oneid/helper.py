@@ -823,7 +823,7 @@ def _find_secure_enclave_helper_binary() -> Path | None:
   """
   se_helper_name = "oneid-se-helper"
 
-  cache_dir = _get_binary_cache_dir()
+  cache_dir = _get_binary_cache_directory()
   cached_path = cache_dir / se_helper_name
   if cached_path.exists() and os.access(str(cached_path), os.X_OK):
     return cached_path
