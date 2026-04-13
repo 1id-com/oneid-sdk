@@ -267,6 +267,10 @@ def send(
   from_display_name: Optional[str] = None,
   cc: Optional[List[str]] = None,
   bcc: Optional[List[str]] = None,
+  reply_to: Optional[str] = None,
+  in_reply_to: Optional[str] = None,
+  references: Optional[str] = None,
+  attachments: Optional[List[Dict[str, Any]]] = None,
   include_attestation: bool = True,
   attestation_mode: str = "both",
   disclosed_claims: Optional[List[str]] = None,
@@ -303,6 +307,12 @@ def send(
     cc: List of Cc recipient addresses (visible to all recipients).
     bcc: List of Bcc recipient addresses (receive the message but are
         hidden from all other recipients -- not placed in any header).
+    reply_to: Reply-To address (where replies should go, if different from sender).
+    in_reply_to: Message-ID of the email being replied to (for threading).
+    references: Space-separated Message-IDs of the thread (for threading).
+    attachments: List of attachment dicts, each with keys:
+        filename (str), content_base64 (str), content_type (str, optional),
+        inline (bool, optional), content_id (str, optional for inline images).
     include_attestation: Whether to include attestation headers (default True).
     attestation_mode: Which RFC attestation mode(s) to use:
       "both"    -- Combined Mode (Section 7: both headers, default).
@@ -352,6 +362,12 @@ def send(
   mime_message["Message-ID"] = email.utils.make_msgid(domain="mailpal.com")
   if cc:
     mime_message["Cc"] = ", ".join(cc)
+  if reply_to:
+    mime_message["Reply-To"] = reply_to
+  if in_reply_to:
+    mime_message["In-Reply-To"] = in_reply_to
+  if references:
+    mime_message["References"] = references
 
   if text_body and html_body:
     mime_message.set_content(text_body)
@@ -360,6 +376,30 @@ def send(
     mime_message.set_content(html_body, subtype="html")
   else:
     mime_message.set_content(text_body or "")
+
+  if attachments:
+    import base64 as _b64
+    for attachment_spec in attachments:
+      raw_bytes = _b64.b64decode(attachment_spec["content_base64"])
+      mime_type = attachment_spec.get("content_type", "application/octet-stream")
+      maintype, _, subtype = mime_type.partition("/")
+      attachment_filename = attachment_spec.get("filename", "attachment")
+      if attachment_spec.get("inline") and attachment_spec.get("content_id"):
+        mime_message.add_attachment(
+          raw_bytes,
+          maintype=maintype,
+          subtype=subtype or "octet-stream",
+          filename=attachment_filename,
+          disposition="inline",
+          cid=attachment_spec["content_id"],
+        )
+      else:
+        mime_message.add_attachment(
+          raw_bytes,
+          maintype=maintype,
+          subtype=subtype or "octet-stream",
+          filename=attachment_filename,
+        )
 
   wire_format_message_bytes = mime_message.as_bytes()
 
@@ -531,8 +571,8 @@ def inbox(
       message_id=msg.get("id", ""),
       from_address=msg.get("from", ""),
       subject=msg.get("subject", ""),
-      received_at=msg.get("received_at", ""),
-      is_unread=msg.get("is_unread", True),
+      received_at=msg.get("date", msg.get("received_at", "")),
+      is_unread=not msg.get("is_read", False) if "is_read" in msg else msg.get("is_unread", True),
     )
     for msg in messages_raw
   ]
