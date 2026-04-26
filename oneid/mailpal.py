@@ -59,6 +59,23 @@ _HTTP_TIMEOUT_SECONDS = 30.0
 _SMTP_HOST = "smtp.mailpal.com"
 _SMTP_PORT_STARTTLS = 587
 _SMTP_TIMEOUT_SECONDS = 30
+_SMTP_SECURITY_MODE_TO_DEFAULT_PORT = {"starttls": 587, "tls": 465, "none": 25}
+
+
+def _discover_smtp_submission_host_via_mx_lookup(domain_name: str) -> str:
+  """Discover SMTP submission host for a domain via DNS MX lookup.
+
+  Returns the lowest-preference MX hostname for the domain.
+  Falls back to smtp.{domain} if MX lookup fails or dnspython is not installed.
+  Install the optional dependency with: pip install oneid[mx]
+  """
+  try:
+    import dns.resolver
+    mx_records = dns.resolver.resolve(domain_name, "MX")
+    lowest_preference_mx_record = min(mx_records, key=lambda r: r.preference)
+    return str(lowest_preference_mx_record.exchange).rstrip(".")
+  except Exception:
+    return f"smtp.{domain_name}"
 
 
 @dataclass
@@ -70,6 +87,7 @@ class SendResult:
   contact_token_header_included: bool = False
   sd_jwt_header_included: bool = False
   direct_attestation_header_included: bool = False
+  rfc5322_message_bytes: Optional[bytes] = None
 
 
 @dataclass
@@ -279,6 +297,10 @@ def send(
   smtp_port: Optional[int] = None,
   smtp_username: Optional[str] = None,
   smtp_password: Optional[str] = None,
+  smtp_domain: Optional[str] = None,
+  smtp_security: Optional[str] = None,
+  smtp_envelope_from: Optional[str] = None,
+  deliver: bool = True,
 ) -> SendResult:
   """
   Send an attested email via direct SMTP submission to smtp.mailpal.com.
@@ -322,24 +344,44 @@ def send(
       "none"    -- No attestation headers (overrides include_attestation)
     disclosed_claims: Which SD-JWT claims to disclose. Default: ["trust_tier"].
     oneid_api_url: Override the 1id.com API URL.
-    smtp_host: Override SMTP host (default: smtp.mailpal.com).
-    smtp_port: Override SMTP port (default: 587/STARTTLS).
+    smtp_host: Override SMTP host (default: smtp.mailpal.com). Accepts
+        hostname, IPv4, or IPv6 in brackets (e.g. "[2001:db8::1]").
+    smtp_port: Override SMTP port. Default depends on smtp_security:
+        587 for starttls, 465 for tls, 25 for none.
     smtp_username: Override SMTP auth username (default: stored mailpal_email).
-        Use this to send from a different Stalwart account (e.g.
-        alice@example.un.ag) while still using the agent's 1id identity
-        for attestation signing.
+        Use this to send from a different account while still using the
+        agent's 1id identity for attestation signing. The SMTP envelope
+        MAIL FROM uses this value (not from_address), so the authenticated
+        account must match what the SMTP server permits.
     smtp_password: Override SMTP auth password. Required when smtp_username
-        is set. This is the Stalwart app_password for the account being
-        sent from.
+        is set. This is the app_password for the SMTP account.
+    smtp_domain: Domain name for MX auto-discovery (alternative to smtp_host).
+        When provided and smtp_host is not, performs DNS MX lookup on this
+        domain. Falls back to smtp.{domain} if MX lookup fails. Requires
+        the optional dnspython dependency: pip install oneid[mx]
+    smtp_security: TLS mode for SMTP connection. One of:
+        "starttls" (default) - plain connect then upgrade via STARTTLS (port 587)
+        "tls" - direct TLS/SMTPS connection (port 465)
+        "none" - no encryption, plain SMTP (port 25, trusted relays only)
+    smtp_envelope_from: Explicit SMTP envelope MAIL FROM override. When set,
+        this address is used instead of smtp_username as the envelope sender.
+        Use when the SMTP relay allows sending on behalf of arbitrary addresses.
+    deliver: If True (default), submit the assembled message via SMTP.
+        If False, skip SMTP delivery and return the complete RFC 5322
+        message bytes in SendResult.rfc5322_message_bytes. Use this to
+        get a fully signed and attested message for delivery through
+        your own SMTP server, archival, or downstream processing.
 
   Returns:
     SendResult with message_id and attestation details.
+    When deliver=False, rfc5322_message_bytes contains the complete
+    RFC 5322 message including any attestation headers.
   """
   creds = load_credentials()
 
   effective_smtp_auth_username = smtp_username or creds.mailpal_email or f"{creds.client_id}@mailpal.com"
   effective_smtp_auth_password = smtp_password or creds.mailpal_app_password
-  if not effective_smtp_auth_password:
+  if deliver and not effective_smtp_auth_password:
     raise NotEnrolledError(
       "No SMTP password available. Either pass smtp_password explicitly, "
       "or call oneid.mailpal.activate() first to store SMTP credentials, "
@@ -369,13 +411,15 @@ def send(
   if references:
     mime_message["References"] = references
 
+  _FORCED_CTE_FOR_STALWART_COMPAT = "quoted-printable"
+
   if text_body and html_body:
-    mime_message.set_content(text_body)
-    mime_message.add_alternative(html_body, subtype="html")
+    mime_message.set_content(text_body, cte=_FORCED_CTE_FOR_STALWART_COMPAT)
+    mime_message.add_alternative(html_body, subtype="html", cte=_FORCED_CTE_FOR_STALWART_COMPAT)
   elif html_body:
-    mime_message.set_content(html_body, subtype="html")
+    mime_message.set_content(html_body, subtype="html", cte=_FORCED_CTE_FOR_STALWART_COMPAT)
   else:
-    mime_message.set_content(text_body or "")
+    mime_message.set_content(text_body or "", cte=_FORCED_CTE_FOR_STALWART_COMPAT)
 
   if attachments:
     import base64 as _b64
@@ -490,29 +534,70 @@ def send(
   else:
     final_message_bytes = wire_format_message_bytes
 
-  # -- Phase 6: Submit via SMTP with STARTTLS + app_password auth --
-  effective_smtp_host = smtp_host or _SMTP_HOST
-  effective_smtp_port = smtp_port or _SMTP_PORT_STARTTLS
+  generated_message_id = mime_message["Message-ID"]
+
+  if not deliver:
+    return SendResult(
+      message_id=generated_message_id,
+      from_address=effective_from_email,
+      attestation_headers_included=mode2_sd_jwt_proof is not None or mode1_direct_attestation_proof is not None,
+      contact_token_header_included=mode2_sd_jwt_proof is not None and mode2_sd_jwt_proof.contact_token is not None,
+      sd_jwt_header_included=mode2_sd_jwt_proof is not None and mode2_sd_jwt_proof.sd_jwt is not None,
+      direct_attestation_header_included=(
+        mode1_direct_attestation_proof is not None
+        and mode1_direct_attestation_proof.hardware_attestation_header_value is not None
+      ),
+      rfc5322_message_bytes=final_message_bytes,
+    )
+
+  # -- Phase 6: Submit via SMTP --
+  if smtp_host:
+    effective_smtp_host = smtp_host
+  elif smtp_domain:
+    effective_smtp_host = _discover_smtp_submission_host_via_mx_lookup(smtp_domain)
+  else:
+    effective_smtp_host = _SMTP_HOST
+
+  effective_smtp_security = smtp_security or "starttls"
+  if effective_smtp_security not in _SMTP_SECURITY_MODE_TO_DEFAULT_PORT:
+    raise ValueError(
+      f"Invalid smtp_security={effective_smtp_security!r}. "
+      f"Must be 'starttls', 'tls', or 'none'."
+    )
+  effective_smtp_port = smtp_port or _SMTP_SECURITY_MODE_TO_DEFAULT_PORT[effective_smtp_security]
+  effective_envelope_sender = smtp_envelope_from or effective_smtp_auth_username
 
   envelope_recipients = _extract_all_envelope_recipient_addresses(to, cc, bcc)
   if not envelope_recipients:
     raise ValueError("No valid recipient email addresses found in to/cc/bcc.")
 
   try:
-    with smtplib.SMTP(effective_smtp_host, effective_smtp_port, timeout=_SMTP_TIMEOUT_SECONDS) as smtp_connection:
-      smtp_connection.ehlo()
-      smtp_connection.starttls()
-      smtp_connection.ehlo()
-      smtp_connection.login(effective_smtp_auth_username, effective_smtp_auth_password)
-      smtp_connection.sendmail(effective_from_email, envelope_recipients, final_message_bytes)
+    if effective_smtp_security == "tls":
+      with smtplib.SMTP_SSL(effective_smtp_host, effective_smtp_port, timeout=_SMTP_TIMEOUT_SECONDS) as smtp_connection:
+        smtp_connection.ehlo()
+        if effective_smtp_auth_username and effective_smtp_auth_password:
+          smtp_connection.login(effective_smtp_auth_username, effective_smtp_auth_password)
+        smtp_connection.sendmail(effective_envelope_sender, envelope_recipients, final_message_bytes)
+    elif effective_smtp_security == "starttls":
+      with smtplib.SMTP(effective_smtp_host, effective_smtp_port, timeout=_SMTP_TIMEOUT_SECONDS) as smtp_connection:
+        smtp_connection.ehlo()
+        smtp_connection.starttls()
+        smtp_connection.ehlo()
+        if effective_smtp_auth_username and effective_smtp_auth_password:
+          smtp_connection.login(effective_smtp_auth_username, effective_smtp_auth_password)
+        smtp_connection.sendmail(effective_envelope_sender, envelope_recipients, final_message_bytes)
+    else:
+      with smtplib.SMTP(effective_smtp_host, effective_smtp_port, timeout=_SMTP_TIMEOUT_SECONDS) as smtp_connection:
+        smtp_connection.ehlo()
+        if effective_smtp_auth_username and effective_smtp_auth_password:
+          smtp_connection.login(effective_smtp_auth_username, effective_smtp_auth_password)
+        smtp_connection.sendmail(effective_envelope_sender, envelope_recipients, final_message_bytes)
   except smtplib.SMTPAuthenticationError as smtp_auth_error:
     raise AuthenticationError(
       f"SMTP authentication failed for {effective_smtp_auth_username}: {smtp_auth_error}"
     ) from smtp_auth_error
   except (smtplib.SMTPException, OSError) as smtp_error:
     raise NetworkError(f"SMTP submission failed: {smtp_error}") from smtp_error
-
-  generated_message_id = mime_message["Message-ID"]
 
   return SendResult(
     message_id=generated_message_id,

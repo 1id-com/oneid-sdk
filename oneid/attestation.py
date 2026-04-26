@@ -30,6 +30,7 @@ RFC: draft-drake-email-hardware-attestation-00
 from __future__ import annotations
 
 import base64
+import email.header
 import hashlib
 import logging
 import struct
@@ -436,16 +437,37 @@ def prepare_direct_hardware_attestation(
   )
 
 
+def decode_rfc2047_encoded_words_to_unicode(raw_header_value: str) -> str:
+  """Decode RFC 2047 encoded-words in a header value to plain Unicode.
+
+  MTAs may re-encode RFC 2047 differently (e.g. splitting across fold points,
+  or consolidating multiple encoded-words). Decoding before canonicalization
+  ensures the attestation hash is independent of encoding representation.
+
+  Pure-ASCII headers pass through unchanged. Only headers containing
+  =?charset?encoding?text?= sequences are affected.
+  """
+  try:
+    decoded_parts = email.header.decode_header(raw_header_value)
+    decoded_unicode = str(email.header.make_header(decoded_parts))
+    return decoded_unicode
+  except Exception:
+    return raw_header_value
+
+
 def canonicalise_header_value_using_dkim_relaxed(raw_value: str) -> str:
   """RFC 6376 Section 3.4.2 relaxed header canonicalization (value part only).
 
-  Pre-step: Normalize all line endings to CRLF.
-  1. Unfold header continuation lines (CRLF followed by WSP).
-  2. Compress each sequence of WSP to a single SP.
-  3. Strip leading/trailing WSP.
+  Pre-step: Decode RFC 2047 encoded-words to Unicode.
+  Then standard DKIM relaxed:
+  1. Normalize all line endings to CRLF.
+  2. Unfold header continuation lines (CRLF followed by WSP).
+  3. Compress each sequence of WSP to a single SP.
+  4. Strip leading/trailing WSP.
   """
   import re
-  normalized = raw_value.replace("\r\n", "\n").replace("\n", "\r\n")
+  decoded_value = decode_rfc2047_encoded_words_to_unicode(raw_value)
+  normalized = decoded_value.replace("\r\n", "\n").replace("\n", "\r\n")
   unfolded = re.sub(r"\r\n[ \t]", " ", normalized)
   compressed = re.sub(r"[ \t]+", " ", unfolded)
   return compressed.strip()
