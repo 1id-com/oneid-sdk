@@ -17,7 +17,7 @@ import pytest
 
 from oneid.auth import (
   TOKEN_REFRESH_MARGIN_SECONDS,
-  _request_token_from_keycloak,
+  _request_token_via_api_proxy,
   clear_cached_token,
   get_token,
 )
@@ -55,7 +55,7 @@ class TestTokenAcquisition:
       mock_http_instance = MockHTTP.return_value.__enter__.return_value
       mock_http_instance.post.return_value = mock_response
 
-      token = _request_token_from_keycloak(_make_test_stored_credentials())
+      token = _request_token_via_api_proxy(_make_test_stored_credentials())
 
     assert isinstance(token, Token)
     assert token.access_token == mock_keycloak_token_response["access_token"]
@@ -76,7 +76,7 @@ class TestTokenAcquisition:
       mock_http_instance.post.return_value = mock_response
 
       with pytest.raises(AuthenticationError, match="Invalid client credentials"):
-        _request_token_from_keycloak(_make_test_stored_credentials())
+        _request_token_via_api_proxy(_make_test_stored_credentials())
 
   def test_network_error_on_connection_failure(self):
     """Connection failure should raise NetworkError."""
@@ -87,7 +87,7 @@ class TestTokenAcquisition:
       mock_http_instance.post.side_effect = httpx.ConnectError("Connection refused")
 
       with pytest.raises(NetworkError):
-        _request_token_from_keycloak(_make_test_stored_credentials())
+        _request_token_via_api_proxy(_make_test_stored_credentials())
 
   def test_network_error_on_timeout(self):
     """Timeout should raise NetworkError."""
@@ -98,7 +98,7 @@ class TestTokenAcquisition:
       mock_http_instance.post.side_effect = httpx.TimeoutException("Timed out")
 
       with pytest.raises(NetworkError):
-        _request_token_from_keycloak(_make_test_stored_credentials())
+        _request_token_via_api_proxy(_make_test_stored_credentials())
 
 
 class TestTokenCaching:

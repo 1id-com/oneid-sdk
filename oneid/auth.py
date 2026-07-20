@@ -213,11 +213,21 @@ def _request_token_via_api_proxy(credentials: StoredCredentials) -> Token:
   if response.status_code != 200:
     try:
       error_body = response.json()
-      error_description = (
-        error_body.get("error", {}).get("message")
-        or error_body.get("error_description")
-        or error_body.get("error", "Unknown error")
-      )
+      # two shapes: 1id API {"error": {"message": ...}} and standard
+      # OAuth {"error": "invalid_client", "error_description": ...}
+      error_field = error_body.get("error")
+      if isinstance(error_field, dict):
+        error_description = (
+          error_field.get("message")
+          or error_body.get("error_description")
+          or "Unknown error"
+        )
+      else:
+        error_description = (
+          error_body.get("error_description")
+          or error_field
+          or "Unknown error"
+        )
     except Exception:
       error_description = f"HTTP {response.status_code}: {response.text[:200]}"
 

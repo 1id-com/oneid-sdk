@@ -32,6 +32,10 @@ def _mock_credentials():
   creds.client_secret = "mock-secret"
   creds.api_base_url = "https://1id.com"
   creds.token_endpoint = "https://1id.com/realms/agents/protocol/openid-connect/token"
+  # send() reads these; a bare MagicMock breaks email.utils.formataddr
+  creds.display_name = "Test Agent"
+  creds.mailpal_email = "1id-TESTMOCK@mailpal.com"
+  creds.mailpal_app_password = "mock-smtp-password"
   return creds
 
 
@@ -698,13 +702,16 @@ class TestPrepareAttestation:
 class TestMailpalSend:
   """Test oneid.mailpal.send() convenience wrapper."""
 
+  # send() submits via direct SMTP (smtplib), not the HTTP API -- these
+  # tests mock smtplib.SMTP and inspect the transmitted message bytes.
+
   @patch("oneid.mailpal.get_token")
   @patch("oneid.mailpal.load_credentials")
   @patch("oneid.mailpal.prepare_attestation")
-  @patch("oneid.mailpal.httpx.Client")
+  @patch("oneid.mailpal.smtplib.SMTP")
   def test_sends_email_with_attestation_headers(
     self,
-    mock_httpx_client_class,
+    mock_smtp_class,
     mock_prepare,
     mock_load_creds,
     mock_get_token,
@@ -714,59 +721,50 @@ class TestMailpalSend:
 
     mock_proof = MagicMock()
     mock_proof.sd_jwt = "signed.sd.jwt"
+    mock_proof.sd_jwt_disclosures = {}
     mock_proof.contact_token = "a1b2c3d4"
     mock_proof.content_digest = "sha256:deadbeef"
     mock_prepare.return_value = mock_proof
 
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {"data": {"message_id": "msg-001", "from": "agent@mailpal.com"}}
-
-    mock_http_client = MagicMock()
-    mock_http_client.__enter__ = MagicMock(return_value=mock_http_client)
-    mock_http_client.__exit__ = MagicMock(return_value=False)
-    mock_http_client.post.return_value = mock_response
-    mock_httpx_client_class.return_value = mock_http_client
+    mock_smtp_connection = MagicMock()
+    mock_smtp_class.return_value.__enter__ = MagicMock(return_value=mock_smtp_connection)
+    mock_smtp_class.return_value.__exit__ = MagicMock(return_value=False)
 
     from oneid.mailpal import send
     result = send(
       to=["recipient@example.com"],
       subject="Test",
       text_body="Hello from test",
+      attestation_mode="sd-jwt",
     )
 
-    assert result.message_id == "msg-001"
+    assert result.message_id  # generated Message-ID
     assert result.attestation_headers_included is True
     assert result.sd_jwt_header_included is True
-    assert result.contact_token_header_included is True
 
-    call_args = mock_http_client.post.call_args
-    sent_json = call_args.kwargs.get("json") or call_args[1].get("json")
-    assert "custom_headers" in sent_json
-    assert sent_json["custom_headers"]["Hardware-Trust-Proof"] == "signed.sd.jwt"
-    assert sent_json["custom_headers"]["X-1ID-Contact-Token"] == "a1b2c3d4"
+    mock_smtp_connection.starttls.assert_called_once()
+    mock_smtp_connection.login.assert_called_once()
+    sent_bytes = mock_smtp_connection.sendmail.call_args[0][2]
+    sent_text = sent_bytes.decode() if isinstance(sent_bytes, bytes) else sent_bytes
+    assert "Hardware-Trust-Proof:" in sent_text
+    assert "signed.sd.jwt" in sent_text
+    assert "X-1ID-Contact-Token: a1b2c3d4" in sent_text
 
   @patch("oneid.mailpal.get_token")
   @patch("oneid.mailpal.load_credentials")
-  @patch("oneid.mailpal.httpx.Client")
+  @patch("oneid.mailpal.smtplib.SMTP")
   def test_sends_email_without_attestation(
     self,
-    mock_httpx_client_class,
+    mock_smtp_class,
     mock_load_creds,
     mock_get_token,
   ):
     mock_get_token.return_value = _mock_token()
     mock_load_creds.return_value = _mock_credentials()
 
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {"data": {"message_id": "msg-002"}}
-
-    mock_http_client = MagicMock()
-    mock_http_client.__enter__ = MagicMock(return_value=mock_http_client)
-    mock_http_client.__exit__ = MagicMock(return_value=False)
-    mock_http_client.post.return_value = mock_response
-    mock_httpx_client_class.return_value = mock_http_client
+    mock_smtp_connection = MagicMock()
+    mock_smtp_class.return_value.__enter__ = MagicMock(return_value=mock_smtp_connection)
+    mock_smtp_class.return_value.__exit__ = MagicMock(return_value=False)
 
     from oneid.mailpal import send
     result = send(
@@ -776,8 +774,11 @@ class TestMailpalSend:
       include_attestation=False,
     )
 
-    assert result.message_id == "msg-002"
+    assert result.message_id
     assert result.attestation_headers_included is False
+    sent_bytes = mock_smtp_connection.sendmail.call_args[0][2]
+    sent_text = sent_bytes.decode() if isinstance(sent_bytes, bytes) else sent_bytes
+    assert "Hardware-Trust-Proof" not in sent_text
 
 
 # ---------------------------------------------------------------------------

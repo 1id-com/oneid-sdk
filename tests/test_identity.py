@@ -27,12 +27,15 @@ from oneid.identity import (
 class TestTrustTierEnum:
   """Verify TrustTier enum matches the spec exactly."""
 
-  def test_all_four_tiers_exist(self):
-    assert len(TrustTier) == 4
+  def test_all_five_tiers_exist(self):
+    # registry-04 defines five tiers: sovereign, portable, enclave,
+    # virtual, declared (this test predated the enclave tier).
+    assert len(TrustTier) == 5
 
   def test_tier_values_match_rfc(self):
     assert TrustTier.SOVEREIGN.value == "sovereign"
     assert TrustTier.PORTABLE.value == "portable"
+    assert TrustTier.ENCLAVE.value == "enclave"
     assert TrustTier.VIRTUAL.value == "virtual"
     assert TrustTier.DECLARED.value == "declared"
 

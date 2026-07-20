@@ -313,6 +313,46 @@ def build_cms_signed_data_for_direct_attestation(
   return content_info
 
 
+def _sign_attestation_digest_with_software_key(
+  attestation_digest_32_bytes: bytes,
+  private_key_pem: str,
+) -> bytes:
+  """Sign the Mode 1 attestation-digest with a software key using the
+  SAME convention as TPM/PIV hardware: the 32-byte digest is signed
+  directly (Prehashed for ECDSA), so verifiers use one rule per
+  algorithm regardless of hardware vs software (typ=SFT).
+
+  ECDSA P-256 -> ES256 with Prehashed(SHA256) (digest signed directly).
+  RSA         -> RS256 PKCS1v15-SHA256 over the digest bytes (verifier
+                 hashes the 32-byte digest input again, per its RS256
+                 rule shared with the TPM path).
+  Ed25519     -> PureEdDSA over the digest bytes.
+  """
+  from cryptography.hazmat.primitives import serialization as _ser
+  from cryptography.hazmat.primitives.asymmetric import (
+    ec as _ec, rsa as _rsa, ed25519 as _ed25519, padding as _padding,
+    utils as _asym_utils,
+  )
+  from cryptography.hazmat.primitives import hashes as _hashes
+
+  private_key = _ser.load_pem_private_key(
+    private_key_pem.encode() if isinstance(private_key_pem, str)
+    else private_key_pem, password=None)
+
+  if isinstance(private_key, _ec.EllipticCurvePrivateKey):
+    return private_key.sign(
+      attestation_digest_32_bytes,
+      _ec.ECDSA(_asym_utils.Prehashed(_hashes.SHA256())))
+  if isinstance(private_key, _rsa.RSAPrivateKey):
+    return private_key.sign(
+      attestation_digest_32_bytes, _padding.PKCS1v15(), _hashes.SHA256())
+  if isinstance(private_key, _ed25519.Ed25519PrivateKey):
+    return private_key.sign(attestation_digest_32_bytes)
+  raise ValueError(
+    "Unsupported software key type for Mode 1 attestation: %s"
+    % type(private_key).__name__)
+
+
 def prepare_direct_hardware_attestation(
   email_headers: Dict[str, str],
   body: bytes,
@@ -409,7 +449,12 @@ def prepare_direct_hardware_attestation(
     ak_handle = creds.hsm_key_reference or ""
     signature_bytes, resolved_algorithm = _sign_with_tpm(attestation_digest, ak_handle)
   elif creds.private_key_pem:
-    signature_bytes = _sign_with_software_key(attestation_digest, creds.private_key_pem)
+    # Mode 1 signs the 32-byte attestation-digest DIRECTLY (prehashed),
+    # the same convention as TPM/PIV hardware -- NOT the challenge-
+    # response scheme (which hashes its input again). Verifiers check
+    # ES256 SFT signatures with Prehashed(SHA256).
+    signature_bytes = _sign_attestation_digest_with_software_key(
+      attestation_digest, creds.private_key_pem)
     resolved_algorithm = algorithm_for_header
   else:
     raise NotEnrolledError("No signing key available.")
@@ -512,13 +557,16 @@ def canonicalise_headers_for_message_binding(
   email_headers: Dict[str, str],
   hardware_trust_proof_header_value_placeholder: str = "",
 ) -> bytes:
-  """Canonicalise email headers per RFC 6376 Section 3.4.2 relaxed rules,
-  as specified by draft-drake-email-hardware-attestation-00 Section 5.3.
+  """Canonicalise email headers for the Mode 2 message-binding nonce, per
+  draft-drake-email-hardware-attestation-03.
 
-  The required headers (From, To, Subject, Date, Message-ID at minimum) are
-  each canonicalised and terminated with CRLF. Then the Hardware-Trust-Proof
-  header is appended last with its value replaced by the empty string and
-  WITHOUT a trailing CRLF.
+  Mode 2 covers a FIXED set: exactly From, To, Subject, Date, Message-ID,
+  in THAT order, each once (no oversigning, no bottom-up selection, no
+  negotiation -- a Mode 2 header carries no explicit covered-header list,
+  so any variation would make the verifier unable to reconstruct the
+  nonce). Each is DKIM-relaxed-canonicalised and CRLF-terminated; then
+  the Hardware-Trust-Proof header is appended last with an empty value
+  and WITHOUT a trailing CRLF.
   """
   lowered_headers = {k.strip().lower(): v for k, v in email_headers.items()}
 
@@ -529,18 +577,11 @@ def canonicalise_headers_for_message_binding(
         f"Required headers: {_MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING}"
       )
 
-  header_names_for_nonce = list(_MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING)
-  header_names_for_nonce = header_names_for_nonce + list(header_names_for_nonce)
-
-  message_header_pairs = list(lowered_headers.items())
-  selected = _select_headers_bottom_up_per_dkim(header_names_for_nonce, message_header_pairs)
-
   canonicalised_header_lines = []
-  for entry in selected:
-    if entry is None:
-      continue
-    canon_name = canonicalise_header_name_using_dkim_relaxed(entry[0])
-    canon_value = canonicalise_header_value_using_dkim_relaxed(entry[1])
+  for required_header_name in _MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING:
+    canon_name = canonicalise_header_name_using_dkim_relaxed(required_header_name)
+    canon_value = canonicalise_header_value_using_dkim_relaxed(
+      lowered_headers[required_header_name])
     canonicalised_header_lines.append(f"{canon_name}:{canon_value}\r\n")
 
   hardware_trust_proof_line = f"hardware-trust-proof:{hardware_trust_proof_header_value_placeholder}"
