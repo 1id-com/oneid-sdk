@@ -38,7 +38,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-import httpx
+from . import _http as httpx  # stdlib-backed drop-in (no httpx dependency)
 from cryptography import x509
 from cryptography.hazmat.primitives.serialization import Encoding
 

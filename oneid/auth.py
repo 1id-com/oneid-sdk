@@ -23,7 +23,7 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 
-import httpx
+from . import _http as httpx  # stdlib-backed drop-in (no httpx dependency)
 
 from ._version import USER_AGENT
 from .credentials import StoredCredentials, load_credentials

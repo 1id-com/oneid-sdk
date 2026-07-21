@@ -193,7 +193,7 @@ def _make_authenticated_request(
     "Authorization": token.authorization_header_value,
   }
 
-  import httpx
+  from . import _http as httpx  # stdlib-backed drop-in (no httpx dependency)
   try:
     with httpx.Client(timeout=api_client.timeout_seconds) as http_client:
       response = http_client.request(
@@ -235,7 +235,7 @@ def _make_unauthenticated_request(
 
   url = f"{api_base_url.rstrip('/')}{path}"
 
-  import httpx
+  from . import _http as httpx  # stdlib-backed drop-in (no httpx dependency)
   try:
     with httpx.Client(timeout=30.0) as http_client:
       response = http_client.request(

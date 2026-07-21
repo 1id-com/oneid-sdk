@@ -9,7 +9,6 @@ Usage:
 """
 
 import pytest
-import httpx
 import secrets
 import sys
 import os

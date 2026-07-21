@@ -29,12 +29,6 @@ Trust tiers (highest to lowest, RFC Section 3):
     'declared'  -- Software keys, no hardware proof, always works
 """
 
-# Repair an already-installed too-old transitive dep (e.g. httpcore
-# < 1.0.9) BEFORE anything imports httpx. Best-effort + opt-out
-# (ONEID_NO_SELF_HEAL=1); never raises, so import always succeeds.
-from ._self_heal import ensure_healthy_dependencies as _ensure_healthy_dependencies
-_ensure_healthy_dependencies()
-
 from .auth import clear_cached_token, get_token
 from .credentials import credentials_exist, load_credentials
 from .enroll import enroll

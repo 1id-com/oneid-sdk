@@ -18,7 +18,7 @@ import logging
 import os
 from typing import Any
 
-import httpx
+from . import _http as httpx  # stdlib-backed drop-in (no httpx dependency)
 
 from .credentials import DEFAULT_API_BASE_URL
 from .exceptions import (
@@ -40,8 +40,9 @@ from ._version import USER_AGENT
 class OneIDAPIClient:
   """HTTP client for the 1id.com enrollment and identity API.
 
-  Wraps httpx.Client with 1id-specific error handling. All methods
-  raise SDK exceptions on failure, never raw HTTP errors.
+  Wraps the SDK's stdlib HTTP client (oneid._http) with 1id-specific
+  error handling. All methods raise SDK exceptions on failure, never
+  raw HTTP errors.
 
   Args:
       api_base_url: Base URL for the 1id.com API (default: https://1id.com).

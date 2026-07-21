@@ -21,7 +21,7 @@ import logging
 import os
 from pathlib import Path
 
-import httpx
+from . import _http as httpx  # stdlib-backed drop-in (no httpx dependency)
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
@@ -125,7 +125,7 @@ def refresh_trust_roots(api_base_url: str | None = None) -> list[x509.Certificat
     List of parsed X.509 root certificates.
 
   Raises:
-    httpx.HTTPError: If the server is unreachable.
+    oneid._http.HTTPError: If the server is unreachable.
     ValueError: If the response is not valid PEM.
   """
   global _cached_root_certificates, _cached_root_pem

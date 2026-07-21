@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oneid"
-version = "1.4.2"
+version = "1.5.0"
 description = "Hardware-anchored identity SDK for AI agents -- 1id.com"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -30,14 +30,10 @@ classifiers = [
 keywords = ["identity", "ai", "agent", "tpm", "yubikey", "piv", "hardware", "oidc", "oauth2", "sybil"]
 
 dependencies = [
-  # httpx pulls httpcore transitively; httpcore < 1.0.9 has a bug that
-  # breaks our HTTPS calls (observed 2026-07-21 on 1.0.7). Pin the floor
-  # EXPLICITLY so `pip install oneid` / `pip install -U oneid` resolve a
-  # good httpcore automatically -- no manual upgrade, no blocked install.
-  # A floor (not a pin) never blocks; oneid/_self_heal.py additionally
-  # repairs an ALREADY-installed broken httpcore at import time.
-  "httpx>=0.27.0",
-  "httpcore>=1.0.9",
+  # HTTP is via the standard library (oneid/_http.py over urllib) -- the
+  # same stack hw-attest-verify uses -- so there is NO httpx/httpcore
+  # dependency (and no transitive-version breakage to guard against).
+  # cryptography is the only hard runtime dependency.
   "cryptography>=41.0",
 ]
 

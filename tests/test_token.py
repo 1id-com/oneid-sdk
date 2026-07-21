@@ -80,22 +80,22 @@ class TestTokenAcquisition:
 
   def test_network_error_on_connection_failure(self):
     """Connection failure should raise NetworkError."""
-    import httpx
+    from oneid import _http
 
     with patch("oneid.auth.httpx.Client") as MockHTTP:
       mock_http_instance = MockHTTP.return_value.__enter__.return_value
-      mock_http_instance.post.side_effect = httpx.ConnectError("Connection refused")
+      mock_http_instance.post.side_effect = _http.ConnectError("Connection refused")
 
       with pytest.raises(NetworkError):
         _request_token_via_api_proxy(_make_test_stored_credentials())
 
   def test_network_error_on_timeout(self):
     """Timeout should raise NetworkError."""
-    import httpx
+    from oneid import _http
 
     with patch("oneid.auth.httpx.Client") as MockHTTP:
       mock_http_instance = MockHTTP.return_value.__enter__.return_value
-      mock_http_instance.post.side_effect = httpx.TimeoutException("Timed out")
+      mock_http_instance.post.side_effect = _http.TimeoutException("Timed out")
 
       with pytest.raises(NetworkError):
         _request_token_via_api_proxy(_make_test_stored_credentials())

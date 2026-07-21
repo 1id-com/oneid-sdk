@@ -788,14 +788,24 @@ class TestMailpalSend:
 class TestMailpalActivate:
   """Test oneid.mailpal.activate() wrapper."""
 
+  # load_credentials/save_credentials MUST be mocked too: activate()
+  # persists the returned mailpal_email/app_password, and without these
+  # patches the test writes mock values into the REAL
+  # ~/.config/oneid/credentials.json (observed corrupting live enclave
+  # credentials before this fix).
+  @patch("oneid.mailpal.save_credentials")
+  @patch("oneid.mailpal.load_credentials")
   @patch("oneid.mailpal.get_token")
   @patch("oneid.mailpal.httpx.Client")
   def test_returns_account_info(
     self,
     mock_httpx_client_class,
     mock_get_token,
+    mock_load_credentials,
+    mock_save_credentials,
   ):
     mock_get_token.return_value = _mock_token()
+    mock_load_credentials.return_value = _mock_credentials()
 
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -821,6 +831,8 @@ class TestMailpalActivate:
     assert account.vanity_email == "clawdia@mailpal.com"
     assert account.app_password == "generated-pw"
     assert account.already_existed is False
+    # persistence must go through the (mocked) save path, never the real file
+    assert mock_save_credentials.called
 
 
 # ---------------------------------------------------------------------------
