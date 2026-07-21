@@ -182,6 +182,42 @@ def enroll(
   )
 
 
+def _portable_no_device_help(tier_name: str) -> str:
+  """Build a portable-tier "no PIV device" error that names the real
+  cause. The #1 real-user confusion is that a security key which logs
+  them into websites (FIDO2/WebAuthn, a HID interface) is NOT the same
+  as the PIV/smartcard interface this tier needs -- so a generic "no
+  HSM found" sends them down the wrong path. See
+  airs_reference_implementation/REAL_USER_ROADBLOCKS.md R-U 1.
+  """
+  import platform
+  system = platform.system()
+  if system == "Windows":
+    fix = ("On Windows (built-in PC/SC, no minidriver needed): if the "
+           "key is plugged in but not seen, run `Restart-Service "
+           "SCardSvr` or unplug/replug (PC/SC often locks the reader); "
+           "ensure the 'Smart Card' service is running and the PIV/CCID "
+           "interface is enabled (`ykman config usb --enable PIV`). "
+           "Note: FIDO2/WebAuthn website logins use a DIFFERENT "
+           "interface, so a key that signs you into websites may still "
+           "have PIV disabled or PC/SC locked.")
+  elif system == "Linux":
+    fix = ("On Linux: install and start pcscd and a PIV stack "
+           "(`apt install pcscd` / `yubikey-manager`); the kernel may "
+           "list the device on USB while nothing can drive the PIV "
+           "applet yet.")
+  else:
+    fix = ("Ensure the device's PIV/smartcard interface is reachable "
+           "on the machine this agent runs on.")
+  return (
+    "No PIV/smartcard device is available for the '%s' tier. The device "
+    "must be plugged into THIS machine (headless servers, KVM switches, "
+    "and remote sessions often do not expose it), and its PIV interface "
+    "-- distinct from the FIDO2/WebAuthn interface used for website "
+    "logins -- must be reachable. %s" % (tier_name, fix)
+  )
+
+
 def _enroll_at_specific_tier(
   tier: TrustTier,
   display_name: str | None,
@@ -424,10 +460,7 @@ def _enroll_piv_tier(
 
   detected_hsms = detect_available_hsms()
   if not detected_hsms:
-    raise NoHSMError(
-      f"No hardware security module found. "
-      f"The '{request_tier.value}' tier requires a YubiKey or similar PIV device."
-    )
+    raise NoHSMError(_portable_no_device_help(request_tier.value))
 
   selected_hsm = _select_hsm_for_tier(detected_hsms, request_tier)
   if selected_hsm is None:

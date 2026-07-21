@@ -40,6 +40,7 @@ import email.message
 import email.policy
 import email.utils
 import logging
+import os
 import smtplib
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -55,10 +56,12 @@ from .exceptions import AuthenticationError, NetworkError, NotEnrolledError
 logger = logging.getLogger("oneid.mailpal")
 
 _MAILPAL_API_BASE_URL = "https://mailpal.com"
-_HTTP_TIMEOUT_SECONDS = 30.0
+# ONEID_HTTP_TIMEOUT_SECONDS lets slow/proxied hosts widen the window
+# (REAL_USER_ROADBLOCKS R-U 3); default unchanged at 30s.
+_HTTP_TIMEOUT_SECONDS = float(os.environ.get("ONEID_HTTP_TIMEOUT_SECONDS", "30.0"))
 _SMTP_HOST = "smtp.mailpal.com"
 _SMTP_PORT_STARTTLS = 587
-_SMTP_TIMEOUT_SECONDS = 30
+_SMTP_TIMEOUT_SECONDS = float(os.environ.get("ONEID_HTTP_TIMEOUT_SECONDS", "30.0"))
 _SMTP_SECURITY_MODE_TO_DEFAULT_PORT = {"starttls": 587, "tls": 465, "none": 25}
 
 

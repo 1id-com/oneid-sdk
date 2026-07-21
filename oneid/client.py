@@ -15,6 +15,7 @@ All responses follow the 1id.com API envelope:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import httpx
@@ -29,7 +30,10 @@ from .exceptions import (
 logger = logging.getLogger("oneid.client")
 
 # -- HTTP client configuration --
-DEFAULT_HTTP_TIMEOUT_SECONDS = 30.0
+# ONEID_HTTP_TIMEOUT_SECONDS lets slow/proxied agent hosts widen the
+# window (REAL_USER_ROADBLOCKS R-U 3); default unchanged at 30s.
+DEFAULT_HTTP_TIMEOUT_SECONDS = float(
+  os.environ.get("ONEID_HTTP_TIMEOUT_SECONDS", "30.0"))
 from ._version import USER_AGENT
 
 

@@ -19,6 +19,7 @@ Token endpoint (F-05 hardened):
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -38,7 +39,11 @@ logger = logging.getLogger("oneid.auth")
 
 # -- Configuration --
 TOKEN_REFRESH_MARGIN_SECONDS = 60
-TOKEN_REQUEST_TIMEOUT_SECONDS = 15.0
+# Overridable via ONEID_HTTP_TIMEOUT_SECONDS: some real agent hosts reach
+# the Issuer over slow/proxied/split-DNS links (REAL_USER_ROADBLOCKS R-U 3)
+# where the default 15s is too tight for the TPM challenge round trip.
+TOKEN_REQUEST_TIMEOUT_SECONDS = float(
+  os.environ.get("ONEID_HTTP_TIMEOUT_SECONDS", "15.0"))
 
 _TIERS_REQUIRING_HARDWARE_AUTH = frozenset({"sovereign", "portable", "enclave", "virtual"})
 _TIERS_USING_TPM = frozenset({"sovereign", "virtual"})
