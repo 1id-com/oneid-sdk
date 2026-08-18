@@ -32,14 +32,14 @@ def mock_server_declared_enrollment_response():
     "ok": True,
     "data": {
       "identity": {
-        "internal_id": "1id-t3stag7x",
-        "handle": "@1id-t3stag7x",
+        "agent_id": "id-xpwsb-rqgdz-vctkm-nfjhx",
+        "handle": "@id-xpwsb-rqgdz-vctkm-nfjhx",
         "trust_tier": "declared",
         "tpm_manufacturer": None,
         "registered_at": "2026-02-11T12:00:00Z",
       },
       "credentials": {
-        "client_id": "1id-t3stag7x",
+        "client_id": "id-xpwsb-rqgdz-vctkm-nfjhx",
         "client_secret": "test-secret-do-not-use-in-production",
         "token_endpoint": "https://1id.com/realms/agents/protocol/openid-connect/token",
         "grant_type": "client_credentials",

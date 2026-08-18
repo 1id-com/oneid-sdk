@@ -62,7 +62,7 @@ from .attestation import (
   prepare_attestation,
   prepare_direct_hardware_attestation,
   build_cms_signed_data_for_direct_attestation,
-  compute_attestation_digest_for_direct_mode,
+  compute_attestation_input_for_direct_mode,
   AttestationProof,
 )
 from .verify import (
@@ -138,8 +138,8 @@ def _build_identity_from_local_credentials() -> Identity:
   except (ValueError, AttributeError):
     enrolled_at = datetime.now(timezone.utc)
 
-  internal_id = creds.client_id
-  handle = f"@{internal_id}" if not internal_id.startswith("@") else internal_id
+  canonical_id = creds.client_id
+  handle = f"@{canonical_id}" if not canonical_id.startswith("@") else canonical_id
 
   hsm_type: HSMType | None = None
   if creds.private_key_pem is not None:
@@ -148,7 +148,7 @@ def _build_identity_from_local_credentials() -> Identity:
     hsm_type = HSMType.TPM
 
   return Identity(
-    internal_id=internal_id,
+    canonical_id=canonical_id,
     handle=handle,
     trust_tier=trust_tier,
     hsm_type=hsm_type,
@@ -322,7 +322,7 @@ __all__ = [
   "prepare_attestation",
   "prepare_direct_hardware_attestation",
   "build_cms_signed_data_for_direct_attestation",
-  "compute_attestation_digest_for_direct_mode",
+  "compute_attestation_input_for_direct_mode",
   "AttestationProof",
   "mailpal",
   # Data types

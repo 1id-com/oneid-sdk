@@ -314,81 +314,81 @@ class TestCanonicaliseHeadersForDirectAttestation:
     assert decoded.endswith("hardware-attestation:v=1; typ=TPM; alg=RS256; chain=")
 
 
-class TestComputeAttestationDigestForDirectMode:
-  """Verify the Mode 1 attestation-digest computation."""
+class TestComputeAttestationInputForDirectMode:
+  """Verify the Mode 1 72-byte attestation-input computation (RFC Section 5.2)."""
 
-  def test_produces_32_byte_sha256_digest(self):
-    from oneid.attestation import compute_attestation_digest_for_direct_mode
-    digest = compute_attestation_digest_for_direct_mode(
+  def test_produces_exactly_72_byte_attestation_input(self):
+    from oneid.attestation import compute_attestation_input_for_direct_mode
+    attestation_input = compute_attestation_input_for_direct_mode(
       email_headers=_SAMPLE_EMAIL_HEADERS,
       body_bytes=b"Hello, world!\r\n",
       attestation_timestamp_unix=1711022400,
     )
-    assert isinstance(digest, bytes)
-    assert len(digest) == 32
+    assert isinstance(attestation_input, bytes)
+    assert len(attestation_input) == 72
 
   def test_deterministic_for_same_inputs(self):
-    from oneid.attestation import compute_attestation_digest_for_direct_mode
-    digest_first = compute_attestation_digest_for_direct_mode(
+    from oneid.attestation import compute_attestation_input_for_direct_mode
+    first = compute_attestation_input_for_direct_mode(
       email_headers=_SAMPLE_EMAIL_HEADERS,
       body_bytes=b"Same body",
       attestation_timestamp_unix=1711022400,
     )
-    digest_second = compute_attestation_digest_for_direct_mode(
+    second = compute_attestation_input_for_direct_mode(
       email_headers=_SAMPLE_EMAIL_HEADERS,
       body_bytes=b"Same body",
       attestation_timestamp_unix=1711022400,
     )
-    assert digest_first == digest_second
+    assert first == second
 
   def test_differs_when_body_changes(self):
-    from oneid.attestation import compute_attestation_digest_for_direct_mode
-    digest_a = compute_attestation_digest_for_direct_mode(
+    from oneid.attestation import compute_attestation_input_for_direct_mode
+    input_a = compute_attestation_input_for_direct_mode(
       email_headers=_SAMPLE_EMAIL_HEADERS,
       body_bytes=b"Body A",
       attestation_timestamp_unix=1711022400,
     )
-    digest_b = compute_attestation_digest_for_direct_mode(
+    input_b = compute_attestation_input_for_direct_mode(
       email_headers=_SAMPLE_EMAIL_HEADERS,
       body_bytes=b"Body B",
       attestation_timestamp_unix=1711022400,
     )
-    assert digest_a != digest_b
+    assert input_a != input_b
 
   def test_differs_when_timestamp_changes(self):
-    from oneid.attestation import compute_attestation_digest_for_direct_mode
-    digest_a = compute_attestation_digest_for_direct_mode(
+    from oneid.attestation import compute_attestation_input_for_direct_mode
+    input_a = compute_attestation_input_for_direct_mode(
       email_headers=_SAMPLE_EMAIL_HEADERS,
       body_bytes=b"Same body",
       attestation_timestamp_unix=1711022400,
     )
-    digest_b = compute_attestation_digest_for_direct_mode(
+    input_b = compute_attestation_input_for_direct_mode(
       email_headers=_SAMPLE_EMAIL_HEADERS,
       body_bytes=b"Same body",
       attestation_timestamp_unix=1711022401,
     )
-    assert digest_a != digest_b
+    assert input_a != input_b
 
   def test_differs_when_self_reference_header_changes(self):
-    from oneid.attestation import compute_attestation_digest_for_direct_mode
-    digest_a = compute_attestation_digest_for_direct_mode(
+    from oneid.attestation import compute_attestation_input_for_direct_mode
+    input_a = compute_attestation_input_for_direct_mode(
       email_headers=_SAMPLE_EMAIL_HEADERS,
       body_bytes=b"body",
       attestation_timestamp_unix=1711022400,
       hardware_attestation_header_value_without_chain="v=1; typ=TPM; chain=",
     )
-    digest_b = compute_attestation_digest_for_direct_mode(
+    input_b = compute_attestation_input_for_direct_mode(
       email_headers=_SAMPLE_EMAIL_HEADERS,
       body_bytes=b"body",
       attestation_timestamp_unix=1711022400,
       hardware_attestation_header_value_without_chain="v=1; typ=PIV; chain=",
     )
-    assert digest_a != digest_b
+    assert input_a != input_b
 
   def test_matches_manual_rfc_computation(self):
-    """Manually compute attestation-digest per RFC and compare."""
+    """Manually compute attestation-input per RFC and compare."""
     from oneid.attestation import (
-      compute_attestation_digest_for_direct_mode,
+      compute_attestation_input_for_direct_mode,
       canonicalise_headers_for_direct_attestation,
       canonicalise_body_using_dkim_simple,
     )
@@ -402,16 +402,41 @@ class TestComputeAttestationDigestForDirectMode:
     h_hash = hashlib.sha256(canon_headers).digest()
     bh_raw = hashlib.sha256(canonicalise_body_using_dkim_simple(body_bytes)).digest()
     ts_bytes = struct.pack(">Q", timestamp)
-    attestation_input = h_hash + bh_raw + ts_bytes
-    expected_digest = hashlib.sha256(attestation_input).digest()
+    expected_attestation_input = h_hash + bh_raw + ts_bytes
 
-    actual_digest = compute_attestation_digest_for_direct_mode(
+    actual = compute_attestation_input_for_direct_mode(
       email_headers=_SAMPLE_EMAIL_HEADERS,
       body_bytes=body_bytes,
       attestation_timestamp_unix=timestamp,
       hardware_attestation_header_value_without_chain=header_template,
     )
-    assert actual_digest == expected_digest
+    assert actual == expected_attestation_input
+    assert len(actual) == 72
+
+  def test_structure_is_h_hash_then_bh_raw_then_ts_bytes(self):
+    """Verify the internal structure: first 32 bytes = h-hash, next 32 = bh-raw, last 8 = ts."""
+    from oneid.attestation import (
+      compute_attestation_input_for_direct_mode,
+      canonicalise_headers_for_direct_attestation,
+      canonicalise_body_using_dkim_simple,
+    )
+    body_bytes = b"Test body\r\n"
+    timestamp = 1711022400
+
+    attestation_input = compute_attestation_input_for_direct_mode(
+      email_headers=_SAMPLE_EMAIL_HEADERS,
+      body_bytes=body_bytes,
+      attestation_timestamp_unix=timestamp,
+    )
+
+    canon_headers = canonicalise_headers_for_direct_attestation(_SAMPLE_EMAIL_HEADERS)
+    expected_h_hash = hashlib.sha256(canon_headers).digest()
+    expected_bh_raw = hashlib.sha256(canonicalise_body_using_dkim_simple(body_bytes)).digest()
+    expected_ts = struct.pack(">Q", timestamp)
+
+    assert attestation_input[:32] == expected_h_hash
+    assert attestation_input[32:64] == expected_bh_raw
+    assert attestation_input[64:] == expected_ts
 
 
 class TestDerEncodingHelpers:
@@ -546,6 +571,302 @@ class TestBuildCmsSignedData:
 
     assert isinstance(result, bytes)
     assert len(result) > 100
+
+
+# ---------------------------------------------------------------------------
+# Tests: G2.2 End-to-end sign+verify and G2.3 signedAttrs absent
+# ---------------------------------------------------------------------------
+
+
+def _generate_ec_test_cert_chain_for_software_declared_tier():
+  """Generate an EC P-256 self-signed CA + leaf cert for software declared-tier testing."""
+  ca_key = ec.generate_private_key(ec.SECP256R1())
+  ca_cert = (
+    x509.CertificateBuilder()
+    .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test SFT CA")]))
+    .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test SFT CA")]))
+    .public_key(ca_key.public_key())
+    .serial_number(x509.random_serial_number())
+    .not_valid_before(datetime.now(timezone.utc))
+    .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
+    .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+    .sign(ca_key, hashes.SHA256())
+  )
+
+  leaf_key = ec.generate_private_key(ec.SECP256R1())
+  leaf_cert = (
+    x509.CertificateBuilder()
+    .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test SFT Leaf")]))
+    .issuer_name(ca_cert.subject)
+    .public_key(leaf_key.public_key())
+    .serial_number(x509.random_serial_number())
+    .not_valid_before(datetime.now(timezone.utc))
+    .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
+    .sign(ca_key, hashes.SHA256())
+  )
+
+  from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
+  chain_pem = (
+    leaf_cert.public_bytes(Encoding.PEM).decode("ascii")
+    + ca_cert.public_bytes(Encoding.PEM).decode("ascii")
+  )
+  private_key_pem = leaf_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode("ascii")
+  return chain_pem, private_key_pem, leaf_cert, ca_cert
+
+
+class TestEndToEndMode1SignThenVerify:
+  """G2.2: Sign with the SDK, verify with the verifier, using software EC key."""
+
+  def test_ec_software_sign_then_verify_round_trip(self):
+    """Full Mode 1 round-trip: SDK signs, verifier verifies."""
+    import sys, os
+    sys.path.insert(0, os.path.join(
+      os.path.dirname(__file__), "..", "..", "hw-attest-verify"))
+
+    from oneid.attestation import (
+      compute_attestation_input_for_direct_mode,
+      canonicalise_headers_for_direct_attestation,
+      _sign_attestation_input_with_software_key,
+      build_cms_signed_data_for_direct_attestation,
+    )
+    from hw_attest_verify.mode1 import verify_hardware_attestation
+
+    chain_pem, private_key_pem, leaf_cert, ca_cert = (
+      _generate_ec_test_cert_chain_for_software_declared_tier())
+
+    body = b"Hello, this is an attested email.\r\n"
+    headers = dict(_SAMPLE_EMAIL_HEADERS)
+    timestamp = 1711022400
+
+    signed_header_names = "from:to:subject:date:message-id:from:to:subject:date:message-id"
+    bh_raw = hashlib.sha256(body).digest()
+    bh_b64url = base64.urlsafe_b64encode(bh_raw).rstrip(b"=").decode("ascii")
+
+    header_template = (
+      f"v=1; typ=SFT; alg=ES256; "
+      f"h={signed_header_names}; bh={bh_b64url}; ts={timestamp}; "
+      f"chain="
+    )
+
+    attestation_input = compute_attestation_input_for_direct_mode(
+      email_headers=headers,
+      body_bytes=body,
+      attestation_timestamp_unix=timestamp,
+      hardware_attestation_header_value_without_chain=header_template,
+    )
+    assert len(attestation_input) == 72
+
+    signature_bytes = _sign_attestation_input_with_software_key(
+      attestation_input, private_key_pem)
+
+    cms_der = build_cms_signed_data_for_direct_attestation(
+      signature_bytes=signature_bytes,
+      certificate_chain_pem=chain_pem,
+      signature_algorithm_rfc_name="ES256",
+    )
+    chain_b64 = base64.b64encode(cms_der).decode("ascii")
+
+    full_header_value = (
+      f"v=1; typ=SFT; alg=ES256; "
+      f"h={signed_header_names}; bh={bh_b64url}; ts={timestamp}; "
+      f"chain={chain_b64}"
+    )
+
+    result = verify_hardware_attestation(
+      header_value=full_header_value,
+      email_headers=headers,
+      body=body,
+      allow_self_signed=True,
+      reference_time_unix=timestamp,
+    )
+
+    assert result.is_valid, f"Verification failed: {result.failure_reasons}"
+    assert result.typ == "SFT"
+    assert result.alg == "ES256"
+    assert result.timestamp_unix == timestamp
+
+  def test_rsa_software_sign_then_verify_round_trip(self):
+    """Full Mode 1 round-trip with RSA key (validates double-hash bug is fixed)."""
+    import sys, os
+    sys.path.insert(0, os.path.join(
+      os.path.dirname(__file__), "..", "..", "hw-attest-verify"))
+
+    from oneid.attestation import (
+      compute_attestation_input_for_direct_mode,
+      _sign_attestation_input_with_software_key,
+      build_cms_signed_data_for_direct_attestation,
+    )
+    from hw_attest_verify.mode1 import verify_hardware_attestation
+    from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
+
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_cert = (
+      x509.CertificateBuilder()
+      .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test RSA CA")]))
+      .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test RSA CA")]))
+      .public_key(ca_key.public_key())
+      .serial_number(x509.random_serial_number())
+      .not_valid_before(datetime.now(timezone.utc))
+      .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
+      .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+      .sign(ca_key, hashes.SHA256())
+    )
+
+    leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    leaf_cert = (
+      x509.CertificateBuilder()
+      .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test RSA Leaf")]))
+      .issuer_name(ca_cert.subject)
+      .public_key(leaf_key.public_key())
+      .serial_number(x509.random_serial_number())
+      .not_valid_before(datetime.now(timezone.utc))
+      .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
+      .sign(ca_key, hashes.SHA256())
+    )
+
+    chain_pem = (
+      leaf_cert.public_bytes(Encoding.PEM).decode("ascii")
+      + ca_cert.public_bytes(Encoding.PEM).decode("ascii")
+    )
+    private_key_pem = leaf_key.private_bytes(
+      Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode("ascii")
+
+    body = b"RSA test body\r\n"
+    headers = dict(_SAMPLE_EMAIL_HEADERS)
+    timestamp = 1711022400
+
+    signed_header_names = "from:to:subject:date:message-id:from:to:subject:date:message-id"
+    bh_raw = hashlib.sha256(body).digest()
+    bh_b64url = base64.urlsafe_b64encode(bh_raw).rstrip(b"=").decode("ascii")
+
+    header_template = (
+      f"v=1; typ=SFT; alg=RS256; "
+      f"h={signed_header_names}; bh={bh_b64url}; ts={timestamp}; "
+      f"chain="
+    )
+
+    attestation_input = compute_attestation_input_for_direct_mode(
+      email_headers=headers,
+      body_bytes=body,
+      attestation_timestamp_unix=timestamp,
+      hardware_attestation_header_value_without_chain=header_template,
+    )
+    assert len(attestation_input) == 72
+
+    signature_bytes = _sign_attestation_input_with_software_key(
+      attestation_input, private_key_pem)
+
+    cms_der = build_cms_signed_data_for_direct_attestation(
+      signature_bytes=signature_bytes,
+      certificate_chain_pem=chain_pem,
+      signature_algorithm_rfc_name="RS256",
+    )
+    chain_b64 = base64.b64encode(cms_der).decode("ascii")
+
+    full_header_value = (
+      f"v=1; typ=SFT; alg=RS256; "
+      f"h={signed_header_names}; bh={bh_b64url}; ts={timestamp}; "
+      f"chain={chain_b64}"
+    )
+
+    result = verify_hardware_attestation(
+      header_value=full_header_value,
+      email_headers=headers,
+      body=body,
+      allow_self_signed=True,
+      reference_time_unix=timestamp,
+    )
+
+    assert result.is_valid, f"RSA verification failed: {result.failure_reasons}"
+    assert result.alg == "RS256"
+
+
+class TestCmsSignedDataHasNoSignedAttrs:
+  """G2.3: Confirm signedAttrs is absent in the CMS SignedData we build."""
+
+  def test_signer_info_has_no_signed_attrs_tag(self):
+    """Per RFC: 'SignerInfo signedAttrs MUST be absent in version 1'.
+    In CMS DER, signedAttrs would be an IMPLICIT [0] tag (0xA0) inside
+    SignerInfo. Our CMS builder must NOT include it."""
+    from oneid.attestation import (
+      build_cms_signed_data_for_direct_attestation,
+      _sign_attestation_input_with_software_key,
+      compute_attestation_input_for_direct_mode,
+    )
+
+    chain_pem, private_key_pem, _, _ = (
+      _generate_ec_test_cert_chain_for_software_declared_tier())
+
+    attestation_input = compute_attestation_input_for_direct_mode(
+      email_headers=_SAMPLE_EMAIL_HEADERS,
+      body_bytes=b"test body\r\n",
+      attestation_timestamp_unix=1711022400,
+    )
+
+    signature = _sign_attestation_input_with_software_key(
+      attestation_input, private_key_pem)
+
+    cms_der = build_cms_signed_data_for_direct_attestation(
+      signature_bytes=signature,
+      certificate_chain_pem=chain_pem,
+      signature_algorithm_rfc_name="ES256",
+    )
+
+    signer_info_bytes = _extract_signer_info_from_cms(cms_der)
+    assert signer_info_bytes is not None, "Could not extract SignerInfo from CMS"
+
+    _verify_no_signed_attrs_in_signer_info(signer_info_bytes)
+
+
+def _extract_signer_info_from_cms(cms_der: bytes) -> bytes:
+  """Extract the raw SignerInfo SEQUENCE bytes from CMS SignedData DER."""
+  from hw_attest_verify.mode1 import _asn1_read_tag_length
+  import sys, os
+  sys.path.insert(0, os.path.join(
+    os.path.dirname(__file__), "..", "..", "hw-attest-verify"))
+
+  offset = 0
+  tag, length, value_offset = _asn1_read_tag_length(cms_der, offset)
+  content_info = cms_der[value_offset:value_offset + length]
+
+  inner_offset = 0
+  _, oid_len, oid_val_offset = _asn1_read_tag_length(content_info, inner_offset)
+  inner_offset = oid_val_offset + oid_len
+
+  _, explicit_len, explicit_val_offset = _asn1_read_tag_length(content_info, inner_offset)
+  signed_data_bytes = content_info[explicit_val_offset:explicit_val_offset + explicit_len]
+
+  _, sd_len, sd_val_offset = _asn1_read_tag_length(signed_data_bytes, 0)
+  sd_content = signed_data_bytes[sd_val_offset:sd_val_offset + sd_len]
+
+  last_set_content = None
+  pos = 0
+  while pos < len(sd_content):
+    elem_tag, elem_len, elem_val_offset = _asn1_read_tag_length(sd_content, pos)
+    elem_end = elem_val_offset + elem_len
+    if elem_tag == 0x31:
+      last_set_content = sd_content[elem_val_offset:elem_end]
+    pos = elem_end
+
+  return last_set_content
+
+
+def _verify_no_signed_attrs_in_signer_info(signer_info_set_content: bytes):
+  """Walk the SignerInfo SEQUENCE and assert no IMPLICIT [0] (signedAttrs) tag."""
+  from hw_attest_verify.mode1 import _asn1_read_tag_length
+
+  si_tag, si_len, si_val_offset = _asn1_read_tag_length(signer_info_set_content, 0)
+  assert si_tag == 0x30, f"Expected SEQUENCE (0x30) for SignerInfo, got 0x{si_tag:02x}"
+
+  si_content = signer_info_set_content[si_val_offset:si_val_offset + si_len]
+  pos = 0
+  while pos < len(si_content):
+    elem_tag, elem_len, elem_val_offset = _asn1_read_tag_length(si_content, pos)
+    assert elem_tag != 0xA0, (
+      "Found IMPLICIT [0] tag (signedAttrs) in SignerInfo -- "
+      "RFC requires signedAttrs MUST be absent in version 1"
+    )
+    pos = elem_val_offset + elem_len
 
 
 # ---------------------------------------------------------------------------

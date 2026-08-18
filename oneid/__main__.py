@@ -43,7 +43,7 @@ def _command_whoami(args: argparse.Namespace) -> int:
     return 1
 
   output = {
-    "internal_id": identity.internal_id,
+    "canonical_id": identity.canonical_id,
     "handle": identity.handle,
     "display_name": identity.display_name,
     "trust_tier": identity.trust_tier.value if hasattr(identity.trust_tier, "value") else str(identity.trust_tier),
@@ -54,7 +54,7 @@ def _command_whoami(args: argparse.Namespace) -> int:
   if args.json:
     print(json.dumps(output, indent=2))
   else:
-    print(f"Identity:   {output['internal_id']}")
+    print(f"Identity:   {output['canonical_id']}")
     print(f"Handle:     {output['handle']}")
     if output["display_name"]:
       print(f"Name:       {output['display_name']}")
@@ -126,7 +126,7 @@ def _command_enroll(args: argparse.Namespace) -> int:
     return 1
 
   print(f"Enrolled successfully!")
-  print(f"Identity:   {identity.internal_id}")
+  print(f"Identity:   {identity.canonical_id}")
   print(f"Handle:     {identity.handle}")
   print(f"Trust tier: {identity.trust_tier.value if hasattr(identity.trust_tier, 'value') else identity.trust_tier}")
   
@@ -152,7 +152,7 @@ def _command_status(args: argparse.Namespace) -> int:
     try:
       from . import whoami
       identity = whoami()
-      print(f"Identity: {identity.internal_id}")
+      print(f"Identity: {identity.canonical_id}")
       print(f"Tier: {identity.trust_tier.value if hasattr(identity.trust_tier, 'value') else identity.trust_tier}")
     except Exception:
       print("Identity: (unable to read)")

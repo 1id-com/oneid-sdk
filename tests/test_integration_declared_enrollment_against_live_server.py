@@ -68,11 +68,11 @@ class TestDeclaredEnrollmentAgainstLiveServer:
     )
 
     assert isinstance(identity, Identity)
-    assert identity.internal_id.startswith("1id-")
-    assert len(identity.internal_id) == 12  # "1id-" + 8 chars
+    assert identity.canonical_id.startswith("id-")
+    assert len(identity.canonical_id) == 26
     assert identity.trust_tier == TrustTier.DECLARED
     assert identity.handle.startswith("@")
-    print(f"\n  Enrolled: {identity.internal_id} as {identity.handle}")
+    print(f"\n  Enrolled: {identity.canonical_id} as {identity.handle}")
 
   def test_enroll_declared_tier_without_handle(self):
     """Enroll at declared tier without a vanity handle."""
@@ -83,10 +83,10 @@ class TestDeclaredEnrollmentAgainstLiveServer:
     )
 
     assert isinstance(identity, Identity)
-    assert identity.internal_id.startswith("1id-")
-    assert identity.handle.startswith("@1id-") or identity.handle.startswith("@")
+    assert identity.canonical_id.startswith("id-")
+    assert identity.handle.startswith("@")
     assert identity.trust_tier == TrustTier.DECLARED
-    print(f"\n  Enrolled: {identity.internal_id} as {identity.handle}")
+    print(f"\n  Enrolled: {identity.canonical_id} as {identity.handle}")
 
   def test_identity_lookup_after_enrollment(self):
     """Enroll, then look up the identity via the public API."""
@@ -102,10 +102,10 @@ class TestDeclaredEnrollmentAgainstLiveServer:
 
     # Now look it up
     api_client = OneIDAPIClient(api_base_url=LIVE_API_BASE_URL)
-    lookup_data = api_client.get_identity(identity.internal_id)
+    lookup_data = api_client.get_identity(identity.canonical_id)
 
-    agent_id_from_lookup = lookup_data.get("agent_id", lookup_data.get("internal_id"))
-    assert agent_id_from_lookup == identity.internal_id
+    agent_id_from_lookup = lookup_data.get("agent_id", lookup_data.get("canonical_id"))
+    assert agent_id_from_lookup == identity.canonical_id
     assert lookup_data.get("handle", "").startswith("@")
     assert lookup_data["trust_tier"] == "declared"
     assert lookup_data["status"] == "active"
@@ -202,8 +202,8 @@ class TestDeclaredEnrollmentAgainstLiveServer:
     claims = json_module.loads(base64.urlsafe_b64decode(payload_b64))
 
     identity_data = server_response.get("identity", {})
-    agent_id = identity_data.get("agent_id", identity_data.get("internal_id"))
-    expected_urn = f"urn:aid:com.1id:{agent_id}"
+    agent_id = identity_data.get("agent_id", identity_data.get("canonical_id"))
+    expected_urn = f"urn:aid:global:{agent_id}"
 
     assert claims.get("trust_tier") == "declared", f"trust_tier missing or wrong: {claims}"
     assert claims.get("handle") is not None, f"handle missing: {claims}"

@@ -363,14 +363,14 @@ def _enroll_declared_tier(
   identity_data = server_response.get("identity", {})
   credentials_data = server_response.get("credentials", {})
 
-  internal_id = identity_data.get("agent_id", identity_data.get("internal_id", ""))
+  canonical_id = identity_data.get("agent_id", identity_data.get("canonical_id", ""))
   agent_identity_urn = identity_data.get("agent_identity_urn", "")
-  handle = identity_data.get("handle", f"@{internal_id[:12]}")
+  handle = identity_data.get("handle", f"@{canonical_id}")
   enrolled_at_str = identity_data.get("registered_at", datetime.now(timezone.utc).isoformat())
 
   # Step 4: Store credentials locally
   stored_credentials = StoredCredentials(
-    client_id=credentials_data.get("client_id", internal_id),
+    client_id=credentials_data.get("client_id", canonical_id),
     client_secret=credentials_data.get("client_secret", ""),
     token_endpoint=credentials_data.get("token_endpoint", f"{api_base_url}/realms/agents/protocol/openid-connect/token"),
     api_base_url=api_base_url,
@@ -404,7 +404,7 @@ def _enroll_declared_tier(
     enrolled_at = datetime.now(timezone.utc)
 
   return Identity(
-    internal_id=internal_id,
+    canonical_id=canonical_id,
     handle=handle,
     trust_tier=TrustTier.DECLARED,
     hsm_type=HSMType.SOFTWARE,
@@ -521,14 +521,14 @@ def _enroll_piv_tier(
   identity_data = activate_response.get("identity", {})
   credentials_data = activate_response.get("credentials", {})
 
-  internal_id = identity_data.get("agent_id", identity_data.get("internal_id", ""))
+  canonical_id = identity_data.get("agent_id", identity_data.get("canonical_id", ""))
   agent_identity_urn = identity_data.get("agent_identity_urn", "")
-  handle = identity_data.get("handle", f"@{internal_id[:12]}")
+  handle = identity_data.get("handle", f"@{canonical_id}")
   trust_tier_str = identity_data.get("trust_tier", request_tier.value)
   enrolled_at_str = identity_data.get("registered_at", datetime.now(timezone.utc).isoformat())
 
   stored_credentials = StoredCredentials(
-    client_id=credentials_data.get("client_id", internal_id),
+    client_id=credentials_data.get("client_id", canonical_id),
     client_secret=credentials_data.get("client_secret", ""),
     token_endpoint=credentials_data.get("token_endpoint", f"{api_base_url}/realms/agents/protocol/openid-connect/token"),
     api_base_url=api_base_url,
@@ -571,7 +571,7 @@ def _enroll_piv_tier(
     hsm_type = HSMType.YUBIKEY
 
   return Identity(
-    internal_id=internal_id,
+    canonical_id=canonical_id,
     handle=handle,
     trust_tier=trust_tier,
     hsm_type=hsm_type,
@@ -746,9 +746,9 @@ def _enroll_enclave_tier(
   identity_data = activate_response.get("identity", {})
   credentials_data = activate_response.get("credentials", {})
 
-  internal_id = identity_data.get("agent_id", identity_data.get("internal_id", ""))
+  canonical_id = identity_data.get("agent_id", identity_data.get("canonical_id", ""))
   agent_identity_urn = identity_data.get("agent_identity_urn", "")
-  handle = identity_data.get("handle", f"@{internal_id[:12]}")
+  handle = identity_data.get("handle", f"@{canonical_id}")
   trust_tier_str = identity_data.get("trust_tier", "enclave")
   enrolled_at_str = identity_data.get("registered_at", datetime.now(timezone.utc).isoformat())
 
@@ -761,7 +761,7 @@ def _enroll_enclave_tier(
     )
 
   stored_credentials = StoredCredentials(
-    client_id=credentials_data.get("client_id", internal_id),
+    client_id=credentials_data.get("client_id", canonical_id),
     client_secret=credentials_data.get("client_secret", ""),
     token_endpoint=credentials_data.get("token_endpoint", f"{api_base_url}/realms/agents/protocol/openid-connect/token"),
     api_base_url=api_base_url,
@@ -789,7 +789,7 @@ def _enroll_enclave_tier(
     enrolled_at = datetime.now(timezone.utc)
 
   return Identity(
-    internal_id=internal_id,
+    canonical_id=canonical_id,
     handle=handle,
     trust_tier=TrustTier.ENCLAVE,
     hsm_type=HSMType.SECURE_ENCLAVE,
@@ -928,14 +928,14 @@ def _enroll_hsm_tier(
   identity_data = activate_response.get("identity", {})
   credentials_data = activate_response.get("credentials", {})
 
-  internal_id = identity_data.get("agent_id", identity_data.get("internal_id", ""))
+  canonical_id = identity_data.get("agent_id", identity_data.get("canonical_id", ""))
   agent_identity_urn = identity_data.get("agent_identity_urn", "")
-  handle = identity_data.get("handle", f"@{internal_id[:12]}")
+  handle = identity_data.get("handle", f"@{canonical_id}")
   trust_tier_str = identity_data.get("trust_tier", request_tier.value)
   enrolled_at_str = identity_data.get("registered_at", datetime.now(timezone.utc).isoformat())
 
   stored_credentials = StoredCredentials(
-    client_id=credentials_data.get("client_id", internal_id),
+    client_id=credentials_data.get("client_id", canonical_id),
     client_secret=credentials_data.get("client_secret", ""),
     token_endpoint=credentials_data.get("token_endpoint", f"{api_base_url}/realms/agents/protocol/openid-connect/token"),
     api_base_url=api_base_url,
@@ -978,7 +978,7 @@ def _enroll_hsm_tier(
     hsm_type = HSMType.TPM
 
   return Identity(
-    internal_id=internal_id,
+    canonical_id=canonical_id,
     handle=handle,
     trust_tier=trust_tier,
     hsm_type=hsm_type,

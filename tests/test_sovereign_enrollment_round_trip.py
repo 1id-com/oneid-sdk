@@ -248,7 +248,7 @@ class TestSovereignEnrollmentRoundTrip(unittest.TestCase):
     identity = activate_response["identity"]
     credentials = activate_response["credentials"]
 
-    self.assertIn("internal_id", identity)
+    self.assertTrue("agent_id" in identity or "canonical_id" in identity)
     self.assertIn("handle", identity)
     self.assertIn("trust_tier", identity)
     self.assertEqual(identity["trust_tier"], trust_tier)
@@ -256,8 +256,9 @@ class TestSovereignEnrollmentRoundTrip(unittest.TestCase):
     self.assertIn("client_id", credentials)
     self.assertIn("client_secret", credentials)
 
+    agent_id = identity.get("agent_id", identity.get("canonical_id"))
     print(f"\n  === ENROLLMENT SUCCESSFUL ===")
-    print(f"  Identity: {identity['internal_id']}")
+    print(f"  Identity: {agent_id}")
     print(f"  Handle: {identity['handle']}")
     print(f"  Trust tier: {identity['trust_tier']}")
     print(f"  TPM manufacturer: {identity.get('tpm_manufacturer', 'N/A')}")

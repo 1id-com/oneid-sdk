@@ -34,7 +34,7 @@ from oneid.world import (
 
 
 _MOCK_STORED_CREDENTIALS = StoredCredentials(
-  client_id="1id-t3stag7x",
+  client_id="id-xpwsb-rqgdz-vctkm-nfjhx",
   client_secret="test-secret",
   token_endpoint="https://1id.com/realms/agents/protocol/openid-connect/token",
   api_base_url="https://1id.com",
@@ -43,16 +43,16 @@ _MOCK_STORED_CREDENTIALS = StoredCredentials(
   private_key_pem="-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIFake\n-----END PRIVATE KEY-----\n",
   enrolled_at="2026-03-01T12:00:00Z",
   display_name="Sparky",
-  agent_identity_urn="urn:aid:com.1id:1id-t3stag7x",
+  agent_identity_urn="urn:aid:global:id-xpwsb-rqgdz-vctkm-nfjhx",
 )
 
 
 _MOCK_WORLD_SERVER_RESPONSE = {
   "identity": {
-    "client_id": "1id-t3stag7x",
+    "client_id": "id-xpwsb-rqgdz-vctkm-nfjhx",
     "trust_tier": "declared",
-    "handle": "@1id-t3stag7x",
-    "agent_identity_urn": "urn:aid:com.1id:1id-t3stag7x",
+    "handle": "@id-xpwsb-rqgdz-vctkm-nfjhx",
+    "agent_identity_urn": "urn:aid:global:id-xpwsb-rqgdz-vctkm-nfjhx",
     "enrolled_at": "2026-03-01T12:00:00Z",
     "hardware_locked": False,
     "operator_email_registered": False,
@@ -88,7 +88,7 @@ _MOCK_WORLD_SERVER_RESPONSE = {
         "priority": "recommended",
         "title": "Get a memorable handle",
         "description": "Your agent has a random handle.",
-        "human_action_url": "https://1id.com/handle/purchase?identity=1id-t3stag7x&token=abc",
+        "human_action_url": "https://1id.com/handle/purchase?identity=id-xpwsb-rqgdz-vctkm-nfjhx&token=abc",
         "agent_api_endpoint": "POST https://1id.com/api/v1/handle/purchase",
       },
       {
@@ -96,7 +96,7 @@ _MOCK_WORLD_SERVER_RESPONSE = {
         "priority": "recommended",
         "title": "Register your contact email",
         "description": "Register an operator email.",
-        "human_action_url": "https://1id.com/operator/contact?identity=1id-t3stag7x&token=def",
+        "human_action_url": "https://1id.com/operator/contact?identity=id-xpwsb-rqgdz-vctkm-nfjhx&token=def",
         "agent_api_endpoint": "PUT https://1id.com/api/v1/identity/operator-email",
       },
     ],
@@ -117,7 +117,7 @@ class TestGetOrCreateIdentityGetOnlyWithExistingCredentials:
       warnings.simplefilter("ignore", DeprecationWarning)
       identity = oneid.get_or_create_identity(get_only=True)
 
-    assert identity.internal_id == "1id-t3stag7x"
+    assert identity.canonical_id == "id-xpwsb-rqgdz-vctkm-nfjhx"
     assert identity.trust_tier == oneid.TrustTier.DECLARED
     assert identity.display_name == "Sparky"
 
@@ -131,7 +131,7 @@ class TestGetOrCreateIdentityGetOnlyWithExistingCredentials:
       warnings.simplefilter("ignore", DeprecationWarning)
       identity = oneid.get_or_create_identity()
 
-    assert identity.internal_id == "1id-t3stag7x"
+    assert identity.canonical_id == "id-xpwsb-rqgdz-vctkm-nfjhx"
 
 
 class TestGetOrCreateIdentityGetOnlyWithNoCredentials:
@@ -177,9 +177,9 @@ class TestStatusReturnsWorldStatus:
     result = oneid.status()
 
     assert isinstance(result, WorldStatus)
-    assert result.identity.client_id == "1id-t3stag7x"
+    assert result.identity.client_id == "id-xpwsb-rqgdz-vctkm-nfjhx"
     assert result.identity.trust_tier == "declared"
-    assert result.identity.handle == "@1id-t3stag7x"
+    assert result.identity.handle == "@id-xpwsb-rqgdz-vctkm-nfjhx"
     assert result.identity.display_name == "Sparky"
     assert result.identity.hardware_locked is False
     assert result.identity.operator_email_registered is False
@@ -254,7 +254,7 @@ class TestStatusReturnsWorldStatus:
     result = oneid.status()
 
     assert result.raw_response is not None
-    assert result.raw_response["identity"]["client_id"] == "1id-t3stag7x"
+    assert result.raw_response["identity"]["client_id"] == "id-xpwsb-rqgdz-vctkm-nfjhx"
 
 
 class TestAlreadyEnrolledErrorMessage:
@@ -301,7 +301,7 @@ class TestWorldStatusParsing:
 
     assert isinstance(result, WorldStatus)
     assert isinstance(result.identity, WorldIdentitySection)
-    assert result.identity.client_id == "1id-t3stag7x"
+    assert result.identity.client_id == "id-xpwsb-rqgdz-vctkm-nfjhx"
     assert result.identity.trust_tier == "declared"
 
   def test_parse_response_without_guidance(self):
@@ -481,7 +481,7 @@ class TestWhoamiDeprecationWarning:
       warnings.simplefilter("ignore", DeprecationWarning)
       identity = oneid.whoami()
 
-    assert identity.internal_id == "1id-t3stag7x"
+    assert identity.canonical_id == "id-xpwsb-rqgdz-vctkm-nfjhx"
 
 
 class TestPublicAPIExports:

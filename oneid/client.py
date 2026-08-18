@@ -391,10 +391,10 @@ class OneIDAPIClient:
     """Look up public identity information for an agent.
 
     Args:
-        agent_id: The agent's internal ID (e.g., '1id-a7b3c9d2').
+        agent_id: The agent's canonical ID (e.g., 'id-xpwsb-rqgdz-vctkm-nfjhx').
 
     Returns:
-        Public identity data (internal_id, handle, trust_tier, etc.).
+        Public identity data (canonical_id, handle, trust_tier, etc.).
     """
     return self._make_request("GET", f"/api/v1/identity/{agent_id}")
 

@@ -16,7 +16,7 @@ from enum import Enum
 class TrustTier(str, Enum):
   """Trust tiers assigned by 1id.com based on hardware attestation.
 
-  RFC: draft-drake-email-hardware-attestation-00 Section 3.
+  RFC: draft-drake-email-hardware-attestation-03 Section 3.
 
   Ordered from highest to lowest Sybil resistance:
   - sovereign (TPM): Non-portable discrete/firmware TPM, manufacturer CA chain verifiable
@@ -74,16 +74,16 @@ class Identity:
   All fields are read-only (frozen dataclass).
 
   Attributes:
-      internal_id: Permanent unique identifier (e.g., '1id-a7b3c9d2').
-                   Lowercase base36 with '1id-' prefix.
-                   NEVER changes, NEVER reused even after revocation.
+      canonical_id: Permanent unique identifier (e.g., 'id-xpwsb-rqgdz-vctkm-nfjhx').
+                    RFC-compliant format: 'id-' + 4 groups of 5 consonant chars.
+                    NEVER changes, NEVER reused even after revocation.
       agent_identity_urn: Full Agent Identity URN (RFC Section 4.1), e.g.,
-                          'urn:aid:1id.com:1id-a3b7k9m2'. This is the 'sub'
-                          claim in JWTs. None for identities created before
-                          the RFC upgrade.
-      handle: Display name (e.g., '@clawdia' or '@1id-a7b3c9d2').
-              If no vanity handle is registered, this is '@' + internal_id.
-              Vanity handles are display-only; internal_id is the real identity.
+                          'urn:aid:global:id-xpwsb-rqgdz-vctkm-nfjhx'. This is
+                          the 'sub' claim in JWTs. None for identities created
+                          before the RFC upgrade.
+      handle: Display name (e.g., '@clawdia' or '@id-xpwsb-rqgdz-vctkm-nfjhx').
+              If no vanity handle is registered, this is '@' + canonical_id.
+              Vanity handles are display-only; canonical_id is the real identity.
       trust_tier: The trust level assigned based on hardware attestation.
       hsm_type: Type of HSM used for enrollment, or None for declared tier.
       hsm_manufacturer: Manufacturer code (e.g., 'INTC', 'Yubico'), or None.
@@ -93,7 +93,7 @@ class Identity:
       display_name: Friendly name chosen by the agent (e.g., "Clawdia", "Sparky").
                     Shown in email From headers and 1ID profile. None if not set.
   """
-  internal_id: str
+  canonical_id: str
   handle: str
   trust_tier: TrustTier
   hsm_type: HSMType | None
@@ -107,7 +107,7 @@ class Identity:
   def __str__(self) -> str:
     name_part = f" ({self.display_name})" if self.display_name else ""
     urn_part = f", urn: {self.agent_identity_urn}" if self.agent_identity_urn else ""
-    return f"{self.handle}{name_part} (tier: {self.trust_tier.value}, id: {self.internal_id}{urn_part})"
+    return f"{self.handle}{name_part} (tier: {self.trust_tier.value}, id: {self.canonical_id}{urn_part})"
 
 
 @dataclass(frozen=True)

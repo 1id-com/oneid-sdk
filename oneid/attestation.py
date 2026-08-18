@@ -24,7 +24,7 @@ Usage:
         email_headers={...}, body=b"Message body",
     )
 
-RFC: draft-drake-email-hardware-attestation-00
+RFC: draft-drake-email-hardware-attestation-03
 """
 
 from __future__ import annotations
@@ -125,16 +125,19 @@ def canonicalise_headers_for_direct_attestation(
   return "".join(canonicalised_header_lines).encode("utf-8")
 
 
-def compute_attestation_digest_for_direct_mode(
+def compute_attestation_input_for_direct_mode(
   email_headers: Dict[str, str],
   body_bytes: bytes,
   attestation_timestamp_unix: int,
   hardware_attestation_header_value_without_chain: str = "",
 ) -> bytes:
-  """Compute the attestation-digest for Mode 1 (RFC Section 5.2).
+  """Compute the 72-byte attestation-input for Mode 1 (RFC Section 5.2).
 
-  attestation-input = h-hash || bh-raw || ts-bytes   (72 bytes)
-  attestation-digest = SHA-256(attestation-input)     (32 bytes)
+  attestation-input = h-hash || bh-raw || ts-bytes   (exactly 72 octets)
+
+  Per RFC: "The externally supplied detached content is the exact 72-octet
+  attestation-input; implementations MUST NOT pre-hash that value and then
+  present the digest to CMS as though it were the content."
 
   The h-hash includes the Hardware-Attestation header itself with chain=""
   (self-referencing, per DKIM convention).
@@ -150,8 +153,7 @@ def compute_attestation_digest_for_direct_mode(
 
   ts_bytes = struct.pack(">Q", attestation_timestamp_unix)
 
-  attestation_input = h_hash + bh_raw + ts_bytes
-  return hashlib.sha256(attestation_input).digest()
+  return h_hash + bh_raw + ts_bytes
 
 
 def _der_encode_length(length_value: int) -> bytes:
@@ -313,25 +315,26 @@ def build_cms_signed_data_for_direct_attestation(
   return content_info
 
 
-def _sign_attestation_digest_with_software_key(
-  attestation_digest_32_bytes: bytes,
+def _sign_attestation_input_with_software_key(
+  attestation_input_72_bytes: bytes,
   private_key_pem: str,
 ) -> bytes:
-  """Sign the Mode 1 attestation-digest with a software key using the
-  SAME convention as TPM/PIV hardware: the 32-byte digest is signed
-  directly (Prehashed for ECDSA), so verifiers use one rule per
-  algorithm regardless of hardware vs software (typ=SFT).
+  """Sign the 72-byte attestation-input with a software key.
 
-  ECDSA P-256 -> ES256 with Prehashed(SHA256) (digest signed directly).
-  RSA         -> RS256 PKCS1v15-SHA256 over the digest bytes (verifier
-                 hashes the 32-byte digest input again, per its RS256
-                 rule shared with the TPM path).
-  Ed25519     -> PureEdDSA over the digest bytes.
+  Uses the same convention as the Go helpers for TPM/PIV/enclave:
+  the library's sign() method hashes the input internally via its
+  algorithm parameter (SHA-256), producing a signature over
+  SHA-256(attestation-input). This matches CMS verification where
+  the verifier supplies the 72-byte attestation-input as detached
+  content and CMS hashes it with digestAlgorithm (SHA-256).
+
+  ECDSA P-256 -> ECDSA(SHA256) hashes input then signs.
+  RSA         -> PKCS1v15+SHA256 hashes input then signs.
+  Ed25519     -> PureEdDSA signs the raw bytes.
   """
   from cryptography.hazmat.primitives import serialization as _ser
   from cryptography.hazmat.primitives.asymmetric import (
     ec as _ec, rsa as _rsa, ed25519 as _ed25519, padding as _padding,
-    utils as _asym_utils,
   )
   from cryptography.hazmat.primitives import hashes as _hashes
 
@@ -341,13 +344,13 @@ def _sign_attestation_digest_with_software_key(
 
   if isinstance(private_key, _ec.EllipticCurvePrivateKey):
     return private_key.sign(
-      attestation_digest_32_bytes,
-      _ec.ECDSA(_asym_utils.Prehashed(_hashes.SHA256())))
+      attestation_input_72_bytes,
+      _ec.ECDSA(_hashes.SHA256()))
   if isinstance(private_key, _rsa.RSAPrivateKey):
     return private_key.sign(
-      attestation_digest_32_bytes, _padding.PKCS1v15(), _hashes.SHA256())
+      attestation_input_72_bytes, _padding.PKCS1v15(), _hashes.SHA256())
   if isinstance(private_key, _ed25519.Ed25519PrivateKey):
-    return private_key.sign(attestation_digest_32_bytes)
+    return private_key.sign(attestation_input_72_bytes)
   raise ValueError(
     "Unsupported software key type for Mode 1 attestation: %s"
     % type(private_key).__name__)
@@ -366,8 +369,8 @@ def prepare_direct_hardware_attestation(
   This function:
   1. Determines the hardware type and signing algorithm from credentials
   2. Builds the header template (all params except chain)
-  3. Computes the attestation-digest (h-hash || bh-raw || ts-bytes)
-  4. Signs the digest with the hardware key
+  3. Computes the 72-byte attestation-input (h-hash || bh-raw || ts-bytes)
+  4. Signs the attestation-input with the hardware key
   5. Builds the CMS SignedData envelope
   6. Assembles the final Hardware-Attestation header value
 
@@ -434,7 +437,7 @@ def prepare_direct_hardware_attestation(
   else:
     header_template_without_chain_with_aid = header_template_without_chain
 
-  attestation_digest = compute_attestation_digest_for_direct_mode(
+  attestation_input_72_bytes = compute_attestation_input_for_direct_mode(
     email_headers=email_headers,
     body_bytes=body,
     attestation_timestamp_unix=attestation_timestamp,
@@ -442,19 +445,15 @@ def prepare_direct_hardware_attestation(
   )
 
   if trust_tier == "portable":
-    signature_bytes, resolved_algorithm = _sign_with_piv(attestation_digest)
+    signature_bytes, resolved_algorithm = _sign_with_piv(attestation_input_72_bytes)
   elif trust_tier == "enclave":
-    signature_bytes, resolved_algorithm = _sign_with_enclave(attestation_digest)
+    signature_bytes, resolved_algorithm = _sign_with_enclave(attestation_input_72_bytes)
   elif trust_tier in ("sovereign", "virtual") or creds.key_algorithm == "tpm-ak":
     ak_handle = creds.hsm_key_reference or ""
-    signature_bytes, resolved_algorithm = _sign_with_tpm(attestation_digest, ak_handle)
+    signature_bytes, resolved_algorithm = _sign_with_tpm(attestation_input_72_bytes, ak_handle)
   elif creds.private_key_pem:
-    # Mode 1 signs the 32-byte attestation-digest DIRECTLY (prehashed),
-    # the same convention as TPM/PIV hardware -- NOT the challenge-
-    # response scheme (which hashes its input again). Verifiers check
-    # ES256 SFT signatures with Prehashed(SHA256).
-    signature_bytes = _sign_attestation_digest_with_software_key(
-      attestation_digest, creds.private_key_pem)
+    signature_bytes = _sign_attestation_input_with_software_key(
+      attestation_input_72_bytes, creds.private_key_pem)
     resolved_algorithm = algorithm_for_header
   else:
     raise NotEnrolledError("No signing key available.")

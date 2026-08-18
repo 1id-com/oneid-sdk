@@ -200,7 +200,7 @@ class DeviceInfo:
 @dataclass(frozen=True)
 class DeviceListResult:
   """Result of listing all devices on an identity."""
-  identity_internal_id: str
+  canonical_id: str
   total_device_count: int
   active_device_count: int
   burned_device_count: int
@@ -243,7 +243,7 @@ class BurnConfirmResult:
 @dataclass(frozen=True)
 class HardwareLockResult:
   """Result of locking an identity to its single hardware device."""
-  identity_internal_id: str
+  canonical_id: str
   hardware_locked: bool
   trust_tier: str
   active_device_count: int
@@ -390,7 +390,7 @@ def list(credentials: StoredCredentials | None = None) -> DeviceListResult:
     credentials = load_credentials()
 
   return DeviceListResult(
-    identity_internal_id=raw_data.get("identity_internal_id", credentials.client_id),
+    canonical_id=raw_data.get("canonical_id", raw_data.get("identity_internal_id", credentials.client_id)),
     total_device_count=raw_data.get("total_devices", len(devices)),
     active_device_count=raw_data.get("active_devices", 0),
     burned_device_count=raw_data.get("burned_devices", 0),
@@ -1064,7 +1064,7 @@ def lock_hardware(
   invalidate_world_cache()
 
   return HardwareLockResult(
-    identity_internal_id=lock_data.get("identity_internal_id", ""),
+    canonical_id=lock_data.get("canonical_id", lock_data.get("identity_internal_id", "")),
     hardware_locked=lock_data.get("hardware_locked", True),
     trust_tier=lock_data.get("trust_tier", ""),
     active_device_count=lock_data.get("active_device_count", 1),

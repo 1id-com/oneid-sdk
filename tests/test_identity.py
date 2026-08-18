@@ -67,7 +67,7 @@ class TestIdentityDataclass:
 
   def _make_identity(self, **overrides):
     defaults = {
-      "internal_id": "1id-t3stag7x",
+      "canonical_id": "id-xpwsb-rqgdz-vctkm-nfjhx",
       "handle": "@test-agent",
       "trust_tier": TrustTier.DECLARED,
       "hsm_type": HSMType.SOFTWARE,
@@ -83,7 +83,7 @@ class TestIdentityDataclass:
     """Identity fields should not be modifiable after creation."""
     identity = self._make_identity()
     with pytest.raises(AttributeError):
-      identity.internal_id = "1id-hacked!!"
+      identity.canonical_id = "id-hacked-hacked-hacked-hckdx"
 
   def test_identity_string_representation_is_useful(self):
     """str(identity) should show handle, tier, and ID."""
@@ -91,7 +91,7 @@ class TestIdentityDataclass:
     s = str(identity)
     assert "@clawdia" in s
     assert "sovereign" in s
-    assert "1id-t3stag7x" in s
+    assert "id-xpwsb-rqgdz-vctkm-nfjhx" in s
 
   def test_sovereign_identity_fields(self):
     identity = self._make_identity(
