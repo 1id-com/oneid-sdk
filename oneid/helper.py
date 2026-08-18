@@ -417,6 +417,9 @@ def extract_attestation_data(hsm: dict) -> dict:
   Runs 'oneid-enroll extract --json --elevated --type <hsm_type>'
   which triggers UAC/sudo to read EK cert and generate AK.
 
+  For enclave types on macOS, automatically recovers from a hung
+  CryptoTokenKit daemon by killing and restarting it, then retrying.
+
   Args:
       hsm: HSM dict from detect_available_hsms().
 
@@ -431,7 +434,21 @@ def extract_attestation_data(hsm: dict) -> dict:
   args = ["--type", hsm_type]
   if hsm_type not in ("yubikey", "piv", "enclave", "secure_enclave"):
     args.append("--elevated")
-  return _run_binary_command("extract", args=args)
+
+  this_hsm_type_uses_secure_enclave = hsm_type in ("enclave", "secure_enclave")
+  for attempt_number in range(2 if this_hsm_type_uses_secure_enclave else 1):
+    try:
+      return _run_binary_command("extract", args=args)
+    except HSMAccessError as extract_error:
+      timed_out = "timed out" in str(extract_error).lower()
+      if timed_out and attempt_number == 0 and this_hsm_type_uses_secure_enclave:
+        logger.warning(
+          "Enclave extract timed out -- attempting CryptoTokenKit daemon recovery"
+        )
+        if _attempt_macos_cryptotokenkit_daemon_recovery():
+          logger.info("ctkd daemon restarted -- retrying enclave extract")
+          continue
+      raise
 
 
 def activate_credential(
@@ -844,6 +861,129 @@ def _find_secure_enclave_helper_binary() -> Path | None:
 
 _ENCLAVE_DEFAULT_KEY_TAG = "com.1id.enclave.default"
 
+_SE_HELPER_COMMAND_TIMEOUT_SECONDS = 15.0
+_CTKD_RESPAWN_WAIT_SECONDS = 3.0
+
+
+def _attempt_macos_cryptotokenkit_daemon_recovery() -> bool:
+  """Kill a hung macOS CryptoTokenKit daemon so launchd respawns a fresh one.
+
+  On macOS, the per-user `ctkd` daemon handles all Secure Enclave XPC
+  requests.  If it becomes unresponsive (observed after days/weeks of
+  uptime), every SE operation blocks indefinitely at an XPC send.
+  Killing the daemon with SIGKILL causes launchd to respawn it within
+  seconds, restoring SE functionality.
+
+  Returns True if recovery was attempted, False if not applicable
+  (wrong platform, daemon not found, or permission denied).
+  """
+  if platform.system() != "Darwin":
+    return False
+
+  import signal
+
+  try:
+    ctkd_pgrep_result = subprocess.run(
+      ["pgrep", "-u", str(os.getuid()), "-x", "ctkd"],
+      capture_output=True, text=True, timeout=5.0,
+    )
+    if ctkd_pgrep_result.returncode != 0 or not ctkd_pgrep_result.stdout.strip():
+      logger.warning("ctkd daemon not found for current user -- cannot recover")
+      return False
+
+    ctkd_pid_strings = ctkd_pgrep_result.stdout.strip().split("\n")
+    for ctkd_pid_string in ctkd_pid_strings:
+      ctkd_pid = int(ctkd_pid_string.strip())
+      logger.warning(
+        "Killing unresponsive ctkd daemon (PID %d) to restore "
+        "Secure Enclave access -- launchd will respawn it",
+        ctkd_pid,
+      )
+      os.kill(ctkd_pid, signal.SIGKILL)
+
+    time.sleep(_CTKD_RESPAWN_WAIT_SECONDS)
+    return True
+
+  except (PermissionError, ProcessLookupError) as kill_error:
+    logger.warning("Could not kill ctkd: %s", kill_error)
+    return False
+  except Exception as unexpected_error:
+    logger.warning("ctkd recovery failed unexpectedly: %s", unexpected_error)
+    return False
+
+
+def _run_secure_enclave_helper_with_recovery(
+  se_helper_path: Path,
+  subcommand_and_args: list[str],
+) -> dict:
+  """Run an oneid-se-helper command, auto-recovering from a hung ctkd.
+
+  If the command times out (indicating the CryptoTokenKit daemon is
+  unresponsive), kills the daemon, waits for launchd to respawn it,
+  and retries once.
+
+  Args:
+      se_helper_path: Path to the oneid-se-helper binary.
+      subcommand_and_args: Command and arguments (e.g. ["sign", "--tag", ...]).
+
+  Returns:
+      Parsed JSON dict from the helper's stdout.
+
+  Raises:
+      NoHSMError: Binary not found.
+      HSMAccessError: Command failed after retry.
+  """
+  cmd = [str(se_helper_path)] + subcommand_and_args
+
+  for attempt_number in range(2):
+    try:
+      result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=_SE_HELPER_COMMAND_TIMEOUT_SECONDS,
+      )
+    except subprocess.TimeoutExpired:
+      if attempt_number == 0:
+        logger.warning(
+          "oneid-se-helper timed out after %.0fs -- "
+          "attempting CryptoTokenKit daemon recovery",
+          _SE_HELPER_COMMAND_TIMEOUT_SECONDS,
+        )
+        ctkd_recovery_was_attempted = _attempt_macos_cryptotokenkit_daemon_recovery()
+        if ctkd_recovery_was_attempted:
+          logger.info("ctkd daemon restarted -- retrying SE operation")
+          continue
+      raise HSMAccessError(
+        f"oneid-se-helper timed out after {_SE_HELPER_COMMAND_TIMEOUT_SECONDS}s "
+        f"(ctkd recovery {'attempted but did not help' if attempt_number > 0 else 'not possible'})"
+      )
+    except FileNotFoundError:
+      raise NoHSMError(f"oneid-se-helper binary not found at {se_helper_path}")
+
+    if result.returncode != 0:
+      error_text = result.stderr.strip() or result.stdout.strip()
+      raise HSMAccessError(f"oneid-se-helper failed: {error_text}")
+
+    try:
+      output = json.loads(result.stdout)
+    except json.JSONDecodeError as json_error:
+      raise HSMAccessError(
+        f"oneid-se-helper returned invalid JSON: {json_error}"
+      ) from json_error
+
+    if output.get("status") != "ok":
+      raise HSMAccessError(
+        f"oneid-se-helper returned error: {output.get('error', 'unknown')}"
+      )
+
+    if attempt_number > 0:
+      logger.info("SE operation succeeded after ctkd recovery")
+
+    return output
+
+  raise HSMAccessError("oneid-se-helper failed after ctkd recovery retry")
+
 
 def sign_challenge_with_enclave(nonce_b64: str) -> dict:
   """Sign a challenge nonce using the Apple Secure Enclave -- NO ELEVATION NEEDED.
@@ -851,6 +991,10 @@ def sign_challenge_with_enclave(nonce_b64: str) -> dict:
   Uses the P-256 key stored in the Secure Enclave via the oneid-se-helper
   Swift binary (NOT oneid-enroll, which does not support enclave signing).
   Only available on macOS with Apple Silicon or T2 security chip.
+
+  If the underlying CryptoTokenKit daemon is unresponsive (a known macOS
+  issue after prolonged uptime), the SDK automatically kills and restarts
+  the daemon, then retries the operation.
 
   Args:
       nonce_b64: Base64-encoded nonce from the server.
@@ -872,42 +1016,10 @@ def sign_challenge_with_enclave(nonce_b64: str) -> dict:
       "It should be in ~/.oneid/bin/ alongside oneid-enroll."
     )
 
-  cmd = [
-    str(se_helper_path), "sign",
-    "--tag", _ENCLAVE_DEFAULT_KEY_TAG,
-    "--nonce", nonce_b64,
-  ]
-  logger.debug("Running SE helper: %s", " ".join(cmd))
-
-  try:
-    result = subprocess.run(
-      cmd,
-      capture_output=True,
-      text=True,
-      timeout=30.0,
-    )
-  except subprocess.TimeoutExpired:
-    raise HSMAccessError("oneid-se-helper sign timed out after 30s")
-  except FileNotFoundError:
-    raise NoHSMError(f"oneid-se-helper binary not found at {se_helper_path}")
-
-  if result.returncode != 0:
-    error_text = result.stderr.strip() or result.stdout.strip()
-    raise HSMAccessError(f"oneid-se-helper sign failed: {error_text}")
-
-  try:
-    output = json.loads(result.stdout)
-  except json.JSONDecodeError as json_error:
-    raise HSMAccessError(
-      f"oneid-se-helper returned invalid JSON: {json_error}"
-    ) from json_error
-
-  if output.get("status") != "ok":
-    raise HSMAccessError(
-      f"oneid-se-helper sign returned error: {output.get('error', 'unknown')}"
-    )
-
-  return output
+  return _run_secure_enclave_helper_with_recovery(
+    se_helper_path,
+    ["sign", "--tag", _ENCLAVE_DEFAULT_KEY_TAG, "--nonce", nonce_b64],
+  )
 
 
 def sign_challenge_with_tpm(nonce_b64: str, ak_handle: str = "") -> dict:
