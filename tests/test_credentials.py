@@ -35,7 +35,7 @@ from oneid.exceptions import NotEnrolledError, OneIDError
 def _make_test_credentials(**overrides) -> StoredCredentials:
   """Create a StoredCredentials instance with sensible test defaults."""
   defaults = {
-    "client_id": "1id-t3stag7x",
+    "client_id": "id-tsthj-zhshb-sqpck-bghgw",
     "client_secret": "test-secret-value-not-for-production",
     "token_endpoint": "https://1id.com/realms/agents/protocol/openid-connect/token",
     "api_base_url": "https://1id.com",

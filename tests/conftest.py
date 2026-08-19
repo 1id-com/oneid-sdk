@@ -63,7 +63,7 @@ def mock_server_error_ek_already_registered():
     "data": None,
     "error": {
       "code": "EK_ALREADY_REGISTERED",
-      "message": "This TPM endorsement key is already associated with identity 1id-existing1",
+      "message": "This TPM endorsement key is already associated with identity id-fmwxx-dwjkk-jgvkb-qnspp",
     },
   }
 

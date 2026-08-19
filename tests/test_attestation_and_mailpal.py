@@ -28,13 +28,13 @@ from datetime import datetime, timezone, timedelta
 def _mock_credentials():
   """Return a mock StoredCredentials object."""
   creds = MagicMock()
-  creds.client_id = "1id-TESTMOCK"
+  creds.client_id = "id-tsthj-zhshb-sqpck-bghgw"
   creds.client_secret = "mock-secret"
   creds.api_base_url = "https://1id.com"
   creds.token_endpoint = "https://1id.com/realms/agents/protocol/openid-connect/token"
   # send() reads these; a bare MagicMock breaks email.utils.formataddr
   creds.display_name = "Test Agent"
-  creds.mailpal_email = "1id-TESTMOCK@mailpal.com"
+  creds.mailpal_email = "id-tsthj-zhshb-sqpck-bghgw@mailpal.com"
   creds.mailpal_app_password = "mock-smtp-password"
   return creds
 
@@ -1132,7 +1132,7 @@ class TestMailpalActivate:
     mock_response.status_code = 200
     mock_response.json.return_value = {
       "data": {
-        "primary_email": "1id-TESTMOCK@mailpal.com",
+        "primary_email": "id-tsthj-zhshb-sqpck-bghgw@mailpal.com",
         "vanity_email": "clawdia@mailpal.com",
         "app_password": "generated-pw",
         "already_existed": False,
@@ -1148,7 +1148,7 @@ class TestMailpalActivate:
     from oneid.mailpal import activate
     account = activate()
 
-    assert account.primary_email == "1id-TESTMOCK@mailpal.com"
+    assert account.primary_email == "id-tsthj-zhshb-sqpck-bghgw@mailpal.com"
     assert account.vanity_email == "clawdia@mailpal.com"
     assert account.app_password == "generated-pw"
     assert account.already_existed is False

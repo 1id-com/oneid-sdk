@@ -406,7 +406,7 @@ class OneIDAPIClient:
     """Get an OAuth2 access token using the client_credentials grant.
 
     Args:
-        client_id: The Keycloak client ID (e.g., '1id-a7b3c9d2').
+        client_id: The Keycloak client ID (e.g., 'id-njshj-zhshb-sqpck-bghgw').
         client_secret: The Keycloak client secret.
 
     Returns:

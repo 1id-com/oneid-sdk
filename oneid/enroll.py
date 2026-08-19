@@ -2,7 +2,7 @@
 Enrollment logic for the 1id.com SDK.
 
 Orchestrates the enrollment flow for all trust tiers
-(RFC: draft-drake-email-hardware-attestation-00 Section 3):
+(RFC: draft-drake-email-hardware-attestation-03 Section 3):
 - Declared:  Pure software, generates a keypair, sends public key to server.
 - Sovereign: Spawns Go binary for TPM operations, two-phase enrollment.
 - Portable:  Spawns Go binary for YubiKey/PIV operations.

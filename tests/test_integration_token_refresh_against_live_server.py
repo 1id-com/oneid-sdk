@@ -112,7 +112,7 @@ class TestTokenRefreshAgainstLiveServer:
     token = get_token()
     claims = _decode_jwt_payload_without_verification(token.access_token)
 
-    expected_urn = f"urn:aid:com.1id:{creds.client_id}"
+    expected_urn = f"urn:aid:global:{creds.client_id}"
     client_id_found_in_token = (
       claims.get("azp") == creds.client_id
       or claims.get("clientId") == creds.client_id

@@ -666,7 +666,7 @@ def prepare_attestation(
   Two modes of operation:
 
   1. **Email attestation (RFC-compliant)**: pass email_headers + body.
-     The nonce is computed per draft-drake-email-hardware-attestation-00
+     The nonce is computed per draft-drake-email-hardware-attestation-03
      Section 5.3 using DKIM relaxed header canonicalization and a
      header+body+timestamp binding.
 

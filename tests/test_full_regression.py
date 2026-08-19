@@ -18,7 +18,7 @@ warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 BASE_URL = "https://1id.com/api/v1"
 TIMEOUT = 15
 
-SOVEREIGN_AGENT_ID = "1id-tkoie2ve"
+SOVEREIGN_AGENT_ID = "id-fmwxx-dwjkk-jgvkb-qnspp"
 
 passed_tests = []
 failed_tests = []
