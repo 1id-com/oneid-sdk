@@ -216,11 +216,13 @@ _OID_RSA_ENCRYPTION = "1.2.840.113549.1.1.1"
 _OID_SHA256_WITH_RSA = "1.2.840.113549.1.1.11"
 _OID_ECDSA_WITH_SHA256 = "1.2.840.10045.4.3.2"
 _OID_RSA_PSS = "1.2.840.113549.1.1.10"
+_OID_ED25519 = "1.3.101.112"
 
 _RFC_ALG_TO_SIGNATURE_OID = {
   "RS256": _OID_SHA256_WITH_RSA,
   "ES256": _OID_ECDSA_WITH_SHA256,
   "PS256": _OID_RSA_PSS,
+  "EdDSA": _OID_ED25519,
 }
 
 
@@ -257,12 +259,20 @@ def build_cms_signed_data_for_direct_attestation(
   if signature_oid_string is None:
     raise ValueError(f"Unsupported signature algorithm: {signature_algorithm_rfc_name}")
 
-  sha256_algorithm_identifier = _der_encode_tag_length_value(
-    0x30,
-    _der_encode_oid(_OID_SHA256) + _der_encode_tag_length_value(0x05, b""),
-  )
+  # RFC 8419: EdDSA uses its own OID as the digestAlgorithm (PureEdDSA
+  # has no separate hash step). All other algorithms use SHA-256.
+  if signature_algorithm_rfc_name == "EdDSA":
+    digest_algorithm_identifier = _der_encode_tag_length_value(
+      0x30,
+      _der_encode_oid(_OID_ED25519),
+    )
+  else:
+    digest_algorithm_identifier = _der_encode_tag_length_value(
+      0x30,
+      _der_encode_oid(_OID_SHA256) + _der_encode_tag_length_value(0x05, b""),
+    )
 
-  digest_algorithms_set = _der_encode_tag_length_value(0x31, sha256_algorithm_identifier)
+  digest_algorithms_set = _der_encode_tag_length_value(0x31, digest_algorithm_identifier)
 
   encap_content_info = _der_encode_tag_length_value(
     0x30,
@@ -290,7 +300,7 @@ def build_cms_signed_data_for_direct_attestation(
     0x30,
     _der_encode_integer(1)
     + issuer_and_serial_number
-    + sha256_algorithm_identifier
+    + digest_algorithm_identifier
     + signature_algorithm_identifier
     + signature_octet_string,
   )
@@ -360,6 +370,7 @@ def prepare_direct_hardware_attestation(
   email_headers: Dict[str, str],
   body: bytes,
   agent_identity_urn: Optional[str] = None,
+  binding_jws: Optional[str] = None,
 ) -> AttestationProof:
   """Prepare a Mode 1 (Direct Hardware Attestation) proof.
 
@@ -472,6 +483,8 @@ def prepare_direct_hardware_attestation(
   )
   if agent_identity_urn:
     final_header_value += f"; aid={agent_identity_urn}"
+  if binding_jws:
+    final_header_value += f"; bind={binding_jws}"
 
   body_digest_hex = hashlib.sha256(body).hexdigest()
 
@@ -670,7 +683,7 @@ def prepare_attestation(
     email_headers: Dict of email header name -> value (RFC mode).
                    Must include at least From, To, Subject, Date, Message-ID.
     body: Raw email body bytes (RFC mode). Used with email_headers.
-    disclosed_claims: Which SD-JWT claims to disclose. Default: ["trust_tier"].
+    disclosed_claims: Which SD-JWT claims to disclose. Default: ["aid"].
     include_contact_token: Whether to fetch a contact token (default True).
     include_sd_jwt: Whether to fetch an SD-JWT proof (default True).
     api_base_url: Override the 1id.com API base URL.
@@ -708,7 +721,7 @@ def prepare_attestation(
     content_digest = f"sha256:{body_digest_hex}"
 
   if disclosed_claims is None:
-    disclosed_claims = ["trust_tier"]
+    disclosed_claims = ["aid"]
 
   creds = load_credentials()
   if api_base_url is None:
@@ -817,6 +830,38 @@ def _fetch_sd_jwt_proof_for_message(
   if "data" in data:
     data = data["data"]
   return data.get("sd_jwt"), data.get("disclosures", {})
+
+
+def _fetch_binding_jws(
+  api_base_url: str,
+  auth_headers: Dict[str, str],
+  proof_public_key_jwk: Dict[str, Any],
+) -> Optional[str]:
+  """Fetch a Registrar Binding JWS from the server (RFC Section 5.4).
+
+  The binding JWS proves the Registrar attests this operational proof key
+  belongs to this canonical identity. Used in Combined mode (Mode 1 + Mode 2).
+
+  Returns the compact JWS string, or None on failure.
+  """
+  url = f"{api_base_url}/api/v1/proof/binding"
+  body = {"proof_public_key_jwk": proof_public_key_jwk}
+
+  try:
+    with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+      response = client.post(url, json=body, headers=auth_headers)
+  except (httpx.ConnectError, httpx.TimeoutException) as error:
+    logger.warning("Binding JWS request failed: %s", error)
+    return None
+
+  if response.status_code != 200:
+    logger.warning("Binding JWS request failed (HTTP %d)", response.status_code)
+    return None
+
+  data = response.json()
+  if "data" in data:
+    data = data["data"]
+  return data.get("binding_jws")
 
 
 def _fetch_contact_token(

@@ -345,7 +345,7 @@ def send(
       "sd-jwt"  -- Mode 2 only (Hardware-Trust-Proof header)
       "direct"  -- Mode 1 only (Hardware-Attestation header with CMS bundle)
       "none"    -- No attestation headers (overrides include_attestation)
-    disclosed_claims: Which SD-JWT claims to disclose. Default: ["trust_tier"].
+    disclosed_claims: Which SD-JWT claims to disclose. Default: ["aid"].
     oneid_api_url: Override the 1id.com API URL.
     smtp_host: Override SMTP host (default: smtp.mailpal.com). Accepts
         hostname, IPv4, or IPv6 in brackets (e.g. "[2001:db8::1]").

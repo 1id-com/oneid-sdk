@@ -460,8 +460,10 @@ def activate_credential(
   """Decrypt a credential activation challenge via the HSM.
 
   Runs 'oneid-enroll activate --json --elevated --credential-blob <b64>
-  --encrypted-secret <b64>' which uses the TPM to decrypt the server's
-  MakeCredential challenge, proving the AK is in this TPM.
+  --encrypted-secret <b64>'. The --elevated flag causes the binary to
+  request admin privileges (UAC on Windows, pkexec/sudo on Linux) if not
+  already running elevated. This is required because ActivateCredential
+  is blocked for standard users by TBS on Windows.
 
   The AK is recreated on-demand (transient, deterministic -- same key every
   time). If ak_handle is a persistent hex handle (backward compat), it is
@@ -477,13 +479,13 @@ def activate_credential(
       Base64-encoded decrypted credential secret.
   """
   activate_args = [
+    "--elevated",
     "--credential-blob", credential_blob_b64,
     "--encrypted-secret", encrypted_secret_b64,
-    "--elevated",
   ]
   if ak_handle and ak_handle != "transient":
     activate_args.extend(["--ak-handle", ak_handle])
-  output = _run_binary_command("activate", args=activate_args)
+  output = _run_binary_command("activate", args=activate_args, timeout_seconds=120.0)
   return output.get("decrypted_credential", "")
 
 
