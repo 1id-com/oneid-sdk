@@ -301,8 +301,8 @@ class TestCanonicaliseHeadersForDirectAttestation:
     from oneid.attestation import canonicalise_headers_for_direct_attestation
     result = canonicalise_headers_for_direct_attestation(_SAMPLE_EMAIL_HEADERS)
     decoded = result.decode("utf-8")
-    assert decoded.endswith("hardware-attestation:")
-    assert not decoded.endswith("hardware-attestation:\r\n")
+    assert decoded.endswith("hardware-attestation: ")
+    assert not decoded.endswith("hardware-attestation: \r\n")
 
   def test_includes_header_value_in_self_reference(self):
     from oneid.attestation import canonicalise_headers_for_direct_attestation
@@ -311,7 +311,7 @@ class TestCanonicaliseHeadersForDirectAttestation:
       hardware_attestation_header_value_without_chain="v=1; typ=TPM; alg=RS256; chain=",
     )
     decoded = result.decode("utf-8")
-    assert decoded.endswith("hardware-attestation:v=1; typ=TPM; alg=RS256; chain=")
+    assert decoded.endswith("hardware-attestation: v=1; typ=TPM; alg=RS256; chain=")
 
 
 class TestComputeAttestationInputForDirectMode:

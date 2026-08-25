@@ -245,6 +245,55 @@ def activate(
   return account
 
 
+def _extract_public_key_jwk_from_certificate_chain_pem(
+  certificate_chain_pem: str,
+) -> Optional[Dict[str, Any]]:
+  """Extract a JWK dict from the leaf certificate in a PEM chain.
+
+  The leaf cert is the first cert in the chain. Its public key is
+  converted to JWK format for use in the Registrar Binding JWS request.
+  """
+  import base64 as _b64
+  try:
+    from cryptography import x509
+    from cryptography.hazmat.primitives.asymmetric import rsa as _rsa_types, ec as _ec_types
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    leaf_pem_start = certificate_chain_pem.find("-----BEGIN CERTIFICATE-----")
+    leaf_pem_end = certificate_chain_pem.find("-----END CERTIFICATE-----")
+    if leaf_pem_start < 0 or leaf_pem_end < 0:
+      return None
+    leaf_pem = certificate_chain_pem[leaf_pem_start:leaf_pem_end + len("-----END CERTIFICATE-----")]
+    cert = x509.load_pem_x509_certificate(leaf_pem.encode("utf-8"))
+    pub = cert.public_key()
+
+    if isinstance(pub, _rsa_types.RSAPublicKey):
+      numbers = pub.public_numbers()
+      n_bytes = numbers.n.to_bytes((numbers.n.bit_length() + 7) // 8, "big")
+      e_bytes = numbers.e.to_bytes((numbers.e.bit_length() + 7) // 8, "big")
+      return {
+        "kty": "RSA",
+        "n": _b64.urlsafe_b64encode(n_bytes).rstrip(b"=").decode("ascii"),
+        "e": _b64.urlsafe_b64encode(e_bytes).rstrip(b"=").decode("ascii"),
+      }
+    elif isinstance(pub, _ec_types.EllipticCurvePublicKey):
+      numbers = pub.public_numbers()
+      key_size = (pub.key_size + 7) // 8
+      x_bytes = numbers.x.to_bytes(key_size, "big")
+      y_bytes = numbers.y.to_bytes(key_size, "big")
+      crv = "P-256" if pub.key_size == 256 else "P-384" if pub.key_size == 384 else "P-521"
+      return {
+        "kty": "EC",
+        "crv": crv,
+        "x": _b64.urlsafe_b64encode(x_bytes).rstrip(b"=").decode("ascii"),
+        "y": _b64.urlsafe_b64encode(y_bytes).rstrip(b"=").decode("ascii"),
+      }
+    return None
+  except Exception as extraction_error:
+    logger.warning("Could not extract JWK from certificate chain: %s", extraction_error)
+    return None
+
+
 def _fold_long_header_value_for_smtp_transmission(header_name: str, header_value: str) -> str:
   """Fold a header into continuation lines per RFC 5322 Section 2.2.3.
 
@@ -495,10 +544,31 @@ def send(
 
     if include_direct_mode:
       try:
-        from .attestation import prepare_direct_hardware_attestation
+        from .attestation import prepare_direct_hardware_attestation, _fetch_binding_jws
+        fetched_binding_jws = None
+        if creds.identity_certificate_chain_pem and creds.agent_identity_urn:
+          try:
+            token_for_binding = get_token()
+            binding_auth_headers = {
+              "Authorization": f"Bearer {token_for_binding.access_token}",
+              "User-Agent": USER_AGENT,
+            }
+            proof_public_key_jwk = _extract_public_key_jwk_from_certificate_chain_pem(
+              creds.identity_certificate_chain_pem)
+            if proof_public_key_jwk:
+              api_base = oneid_api_url or creds.api_base_url or "https://1id.com"
+              fetched_binding_jws = _fetch_binding_jws(
+                api_base, binding_auth_headers, proof_public_key_jwk)
+              if fetched_binding_jws:
+                logger.info("Fetched Registrar Binding JWS for Mode 1")
+              else:
+                logger.warning("Binding JWS not available; Mode 1 will lack bind parameter")
+          except Exception as binding_error:
+            logger.warning("Failed to fetch binding JWS: %s", binding_error)
         mode1_direct_attestation_proof = prepare_direct_hardware_attestation(
           email_headers=wire_format_all_headers_for_mode1,
           body=wire_format_body_bytes,
+          binding_jws=fetched_binding_jws,
         )
       except Exception as mode1_error:
         logger.warning("Mode 1 (direct) attestation failed: %s", mode1_error)

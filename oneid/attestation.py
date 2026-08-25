@@ -119,7 +119,7 @@ def canonicalise_headers_for_direct_attestation(
     canon_value = canonicalise_header_value_using_dkim_relaxed(entry[1])
     canonicalised_header_lines.append(f"{canon_name}:{canon_value}\r\n")
 
-  self_referencing_attestation_line = f"hardware-attestation:{hardware_attestation_header_value_without_chain}"
+  self_referencing_attestation_line = f"hardware-attestation: {hardware_attestation_header_value_without_chain}"
   canonicalised_header_lines.append(self_referencing_attestation_line)
 
   return "".join(canonicalised_header_lines).encode("utf-8")
@@ -247,7 +247,18 @@ def build_cms_signed_data_for_direct_attestation(
     pem_block = pem_block.strip()
     if pem_block and "-----BEGIN CERTIFICATE-----" in pem_block:
       full_pem = pem_block + "\n-----END CERTIFICATE-----\n"
-      cert_object = x509.load_pem_x509_certificate(full_pem.encode("ascii"))
+      try:
+        pem_bytes = full_pem.encode("utf-8", errors="surrogateescape")
+      except (UnicodeEncodeError, UnicodeDecodeError):
+        pem_bytes = full_pem.encode("latin-1")
+      try:
+        cert_object = x509.load_pem_x509_certificate(pem_bytes)
+      except (ValueError, Exception) as cert_parse_error:
+        import logging
+        logging.getLogger("oneid.attestation").warning(
+          "Skipping unparseable certificate in chain: %s", cert_parse_error
+        )
+        continue
       certificate_der_list.append(cert_object.public_bytes(Encoding.DER))
       if leaf_certificate is None:
         leaf_certificate = cert_object
@@ -289,10 +300,16 @@ def build_cms_signed_data_for_direct_attestation(
     issuer_der_bytes + serial_number_der,
   )
 
-  signature_algorithm_identifier = _der_encode_tag_length_value(
-    0x30,
-    _der_encode_oid(signature_oid_string),
-  )
+  if signature_algorithm_rfc_name == "EdDSA":
+    signature_algorithm_identifier = _der_encode_tag_length_value(
+      0x30,
+      _der_encode_oid(signature_oid_string),
+    )
+  else:
+    signature_algorithm_identifier = _der_encode_tag_length_value(
+      0x30,
+      _der_encode_oid(signature_oid_string) + _der_encode_tag_length_value(0x05, b""),
+    )
 
   signature_octet_string = _der_encode_tag_length_value(0x04, signature_bytes)
 
@@ -412,6 +429,13 @@ def prepare_direct_hardware_attestation(
     if agent_identity_urn_from_credentials:
       agent_identity_urn = agent_identity_urn_from_credentials
 
+  if agent_identity_urn and not binding_jws:
+    logger.info(
+      "Omitting aid from Mode 1 header: sender MUST NOT place aid "
+      "without Registrar binding (RFC Section 5.4)"
+    )
+    agent_identity_urn = None
+
   attestation_timestamp = int(time.time())
 
   canonicalised_body = canonicalise_body_using_dkim_simple(body)
@@ -423,7 +447,7 @@ def prepare_direct_hardware_attestation(
   extra_header_names = sorted(
     h for h in lowered_headers
     if h not in _MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING
-    and h not in ("hardware-attestation", "hardware-trust-proof")
+    and h != "hardware-attestation"
   )
   all_signed_names.extend(extra_header_names)
   signed_header_names = ":".join(all_signed_names) + ":" + ":".join(all_signed_names)
@@ -444,15 +468,15 @@ def prepare_direct_hardware_attestation(
     f"chain="
   )
   if agent_identity_urn:
-    header_template_without_chain_with_aid = header_template_without_chain + f"; aid={agent_identity_urn}"
-  else:
-    header_template_without_chain_with_aid = header_template_without_chain
+    header_template_without_chain += f"; aid={agent_identity_urn}"
+  if binding_jws:
+    header_template_without_chain += f"; bind={binding_jws}"
 
   attestation_input_72_bytes = compute_attestation_input_for_direct_mode(
     email_headers=email_headers,
     body_bytes=body,
     attestation_timestamp_unix=attestation_timestamp,
-    hardware_attestation_header_value_without_chain=header_template_without_chain_with_aid,
+    hardware_attestation_header_value_without_chain=header_template_without_chain,
   )
 
   if trust_tier == "portable":
@@ -469,10 +493,11 @@ def prepare_direct_hardware_attestation(
   else:
     raise NotEnrolledError("No signing key available.")
 
+  actual_algorithm_for_cms = resolved_algorithm if resolved_algorithm else algorithm_for_header
   cms_der_bytes = build_cms_signed_data_for_direct_attestation(
     signature_bytes=signature_bytes,
     certificate_chain_pem=creds.identity_certificate_chain_pem,
-    signature_algorithm_rfc_name=algorithm_for_header,
+    signature_algorithm_rfc_name=actual_algorithm_for_cms,
   )
   chain_base64 = base64.b64encode(cms_der_bytes).decode("ascii")
 

@@ -2,7 +2,9 @@
 
 Python SDK for [1id.com](https://1id.com) -- hardware-anchored identity for AI agents.
 
-RFC: `draft-drake-email-hardware-attestation-00`
+Implements the AIRS (Agent Identity Registry System) drafts:
+- `draft-drake-email-hardware-attestation-03` -- email attestation via hardware keys
+- `draft-drake-agent-identity-registry-04` -- agent identity registry protocol
 
 ## Quick start
 
@@ -12,6 +14,7 @@ import oneid
 # Enroll at declared tier (no HSM needed, always works)
 identity = oneid.enroll(request_tier="declared", display_name="Sparky")
 print(f"Enrolled: {identity.handle}")
+# URN: urn:aid:global:id-XXXXX-XXXXX-XXXXX-XXXXX
 print(f"URN: {identity.agent_identity_urn}")
 
 # Get an OAuth2 token for API access

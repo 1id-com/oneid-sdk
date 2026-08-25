@@ -17,6 +17,7 @@ There are NO automatic fallbacks. The caller's logic decides what to do.
 from __future__ import annotations
 
 import logging
+import platform
 from datetime import datetime, timezone
 
 from .client import OneIDAPIClient
@@ -835,7 +836,6 @@ def _enroll_hsm_tier(
       UACDeniedError: User denied elevation.
       HSMAccessError: HSM found but access failed.
   """
-  # Import helper here to avoid circular imports and to defer binary check
   from .helper import (
     detect_available_hsms,
     extract_attestation_data,
@@ -843,7 +843,7 @@ def _enroll_hsm_tier(
 
   logger.info("Enrolling at %s tier (HSM required)", request_tier.value)
 
-  # Step 1: Detect HSMs via Go binary
+  # Step 1: Detect HSMs via Go binary (no elevation needed)
   detected_hsms = detect_available_hsms()
 
   if not detected_hsms:
@@ -860,53 +860,87 @@ def _enroll_hsm_tier(
       f"but none are compatible with the '{request_tier.value}' tier."
     )
 
-  # Step 3: Extract attestation (requires elevation)
-  attestation_data = extract_attestation_data(selected_hsm)
+  # On Windows, TPM ActivateCredential requires elevation. Use ElevatedSession
+  # to combine extract + activate under a single UAC prompt. The session also
+  # runs setup-tbs while elevated, so future sign operations need 0 UAC.
+  # On non-Windows, everything works without elevation.
+  this_enrollment_needs_elevated_session_for_tpm_activate = (
+    platform.system() == "Windows"
+    and selected_hsm.get("type", "tpm") == "tpm"
+  )
 
-  # Step 4: Begin enrollment with server
-  # Send EK cert + AK public key + AK TPMT_PUBLIC to the server.
-  # Server runs MakeCredential and returns credential_blob + encrypted_secret.
-  api_client = OneIDAPIClient(api_base_url=api_base_url)
-  this_is_a_recovery_not_a_new_enrollment = False
+  if this_enrollment_needs_elevated_session_for_tpm_activate:
+    from .helper import ElevatedSession
+    elevated_tpm_session = ElevatedSession()
+    elevated_tpm_session.start()
+    logger.info("Elevated session started (1 UAC prompt for entire enrollment)")
+  else:
+    elevated_tpm_session = None
 
   try:
-    begin_response = api_client.enroll_begin(
-      ek_certificate_pem=attestation_data["ek_cert_pem"],
-      ak_public_key_pem=attestation_data.get("ak_public_pem", ""),
-      ak_tpmt_public_b64=attestation_data.get("ak_tpmt_public_b64", ""),
-      ek_public_key_pem=attestation_data.get("ek_public_pem", ""),
-      ek_certificate_chain_pem=attestation_data.get("chain_pem", []),
-      hsm_type=selected_hsm.get("type", "tpm"),
-      operator_email=operator_email,
-      requested_handle=requested_handle,
-    )
-  except AlreadyEnrolledError:
-    logger.info(
-      "Hardware already registered -- attempting identity recovery. "
-      "The hardware IS the identity; a machine that forgot its credentials "
-      "can recover by proving it still has the same TPM."
-    )
-    begin_response = api_client.recover_begin(
-      ek_certificate_pem=attestation_data["ek_cert_pem"],
-      ak_public_key_pem=attestation_data.get("ak_public_pem", ""),
-      ak_tpmt_public_b64=attestation_data.get("ak_tpmt_public_b64", ""),
-      ek_public_key_pem=attestation_data.get("ek_public_pem", ""),
-      ek_certificate_chain_pem=attestation_data.get("chain_pem", []),
-    )
-    this_is_a_recovery_not_a_new_enrollment = True
+    # Step 3: Extract attestation data
+    if elevated_tpm_session:
+      attestation_data = elevated_tpm_session.extract(
+        hsm_type=selected_hsm.get("type", "tpm"),
+      )
+    else:
+      attestation_data = extract_attestation_data(selected_hsm)
 
-  # Step 5: Activate credential via TPM (requires elevation).
-  # The server returned credential_blob and encrypted_secret (from MakeCredential).
-  # We pass these to the Go binary, which calls TPM2_ActivateCredential to decrypt.
-  from .helper import activate_credential
+    # Step 4: Begin enrollment with server
+    api_client = OneIDAPIClient(api_base_url=api_base_url)
+    this_is_a_recovery_not_a_new_enrollment = False
 
-  session_id_field = "recovery_session_id" if this_is_a_recovery_not_a_new_enrollment else "enrollment_session_id"
-  decrypted_credential = activate_credential(
-    selected_hsm,
-    credential_blob_b64=begin_response["credential_blob"],
-    encrypted_secret_b64=begin_response["encrypted_secret"],
-    ak_handle=attestation_data.get("ak_handle", ""),
-  )
+    try:
+      begin_response = api_client.enroll_begin(
+        ek_certificate_pem=attestation_data["ek_cert_pem"],
+        ak_public_key_pem=attestation_data.get("ak_public_pem", ""),
+        ak_tpmt_public_b64=attestation_data.get("ak_tpmt_public_b64", ""),
+        ek_public_key_pem=attestation_data.get("ek_public_pem", ""),
+        ek_certificate_chain_pem=attestation_data.get("chain_pem", []),
+        hsm_type=selected_hsm.get("type", "tpm"),
+        operator_email=operator_email,
+        requested_handle=requested_handle,
+      )
+    except AlreadyEnrolledError:
+      logger.info(
+        "Hardware already registered -- attempting identity recovery. "
+        "The hardware IS the identity; a machine that forgot its credentials "
+        "can recover by proving it still has the same TPM."
+      )
+      begin_response = api_client.recover_begin(
+        ek_certificate_pem=attestation_data["ek_cert_pem"],
+        ak_public_key_pem=attestation_data.get("ak_public_pem", ""),
+        ak_tpmt_public_b64=attestation_data.get("ak_tpmt_public_b64", ""),
+        ek_public_key_pem=attestation_data.get("ek_public_pem", ""),
+        ek_certificate_chain_pem=attestation_data.get("chain_pem", []),
+      )
+      this_is_a_recovery_not_a_new_enrollment = True
+
+    # Step 5: Activate credential via TPM
+    session_id_field = (
+      "recovery_session_id"
+      if this_is_a_recovery_not_a_new_enrollment
+      else "enrollment_session_id"
+    )
+
+    if elevated_tpm_session:
+      decrypted_credential = elevated_tpm_session.activate(
+        credential_blob_b64=begin_response["credential_blob"],
+        encrypted_secret_b64=begin_response["encrypted_secret"],
+        ak_handle=attestation_data.get("ak_handle", ""),
+      )
+    else:
+      from .helper import activate_credential
+      decrypted_credential = activate_credential(
+        selected_hsm,
+        credential_blob_b64=begin_response["credential_blob"],
+        encrypted_secret_b64=begin_response["encrypted_secret"],
+        ak_handle=attestation_data.get("ak_handle", ""),
+      )
+  finally:
+    if elevated_tpm_session:
+      elevated_tpm_session.close()
+      logger.info("Elevated session closed")
 
   # Step 6: Complete enrollment (or recovery) with server
   if this_is_a_recovery_not_a_new_enrollment:

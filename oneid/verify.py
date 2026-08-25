@@ -233,7 +233,11 @@ def _parse_certificate_chain_from_pem(pem_bundle: str) -> list[x509.Certificate]
     if block and "-----BEGIN CERTIFICATE-----" in block:
       try:
         full_pem = block + "\n-----END CERTIFICATE-----\n"
-        cert = x509.load_pem_x509_certificate(full_pem.encode("utf-8"))
+        try:
+          pem_bytes = full_pem.encode("utf-8", errors="surrogateescape")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+          pem_bytes = full_pem.encode("latin-1")
+        cert = x509.load_pem_x509_certificate(pem_bytes)
         certificates.append(cert)
       except Exception:
         continue

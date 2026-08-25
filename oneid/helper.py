@@ -412,10 +412,11 @@ def detect_available_hsms() -> list[dict]:
 
 
 def extract_attestation_data(hsm: dict) -> dict:
-  """Extract attestation data from an HSM (requires elevation).
+  """Extract attestation data from an HSM.
 
-  Runs 'oneid-enroll extract --json --elevated --type <hsm_type>'
-  which triggers UAC/sudo to read EK cert and generate AK.
+  Runs 'oneid-enroll extract --json --type <hsm_type>'.
+  On TPM: CreatePrimary (EK) and CreateLoaded (AK) work without elevation
+  on Windows 8+ and all Linux. No UAC/sudo needed.
 
   For enclave types on macOS, automatically recovers from a hung
   CryptoTokenKit daemon by killing and restarting it, then retrying.
@@ -432,8 +433,6 @@ def extract_attestation_data(hsm: dict) -> dict:
   """
   hsm_type = hsm.get("type", "tpm")
   args = ["--type", hsm_type]
-  if hsm_type not in ("yubikey", "piv", "enclave", "secure_enclave"):
-    args.append("--elevated")
 
   this_hsm_type_uses_secure_enclave = hsm_type in ("enclave", "secure_enclave")
   for attempt_number in range(2 if this_hsm_type_uses_secure_enclave else 1):
@@ -459,11 +458,13 @@ def activate_credential(
 ) -> str:
   """Decrypt a credential activation challenge via the HSM.
 
-  Runs 'oneid-enroll activate --json --elevated --credential-blob <b64>
-  --encrypted-secret <b64>'. The --elevated flag causes the binary to
-  request admin privileges (UAC on Windows, pkexec/sudo on Linux) if not
-  already running elevated. This is required because ActivateCredential
-  is blocked for standard users by TBS on Windows.
+  Runs 'oneid-enroll activate --json --credential-blob <b64>
+  --encrypted-secret <b64>'. On Windows, the Go binary auto-elevates
+  via its internal fallback when TBS blocks ActivateCredential
+  (0x80280400). On Linux, no elevation is needed.
+
+  IMPORTANT: For enrollment, prefer ElevatedSession which combines
+  extract + activate under a single UAC prompt.
 
   The AK is recreated on-demand (transient, deterministic -- same key every
   time). If ak_handle is a persistent hex handle (backward compat), it is
@@ -479,7 +480,6 @@ def activate_credential(
       Base64-encoded decrypted credential secret.
   """
   activate_args = [
-    "--elevated",
     "--credential-blob", credential_blob_b64,
     "--encrypted-secret", encrypted_secret_b64,
   ]
