@@ -30,7 +30,7 @@ Trust tiers (highest to lowest, RFC Section 3):
 """
 
 from .auth import clear_cached_token, get_token
-from .credentials import credentials_exist, load_credentials
+from .credentials import credentials_exist, load_credentials, sync_device_certificate_chains_from_server
 from .enroll import enroll
 from .exceptions import (
   AlreadyEnrolledError,

@@ -295,23 +295,97 @@ def _extract_public_key_jwk_from_certificate_chain_pem(
 
 
 def _fold_long_header_value_for_smtp_transmission(header_name: str, header_value: str) -> str:
-  """Fold a header into continuation lines per RFC 5322 Section 2.2.3.
+  """Fold AIRS fields only at locations their individual ABNF permits."""
+  preferred_physical_line_length = 78
+  hard_maximum_physical_line_length = 998
+  lowercase_header_name = header_name.lower()
 
-  Long attestation headers (SD-JWT, CMS chain) can exceed the 998-character
-  hard limit. This function folds at 76-char boundaries using CRLF + HTAB
-  continuation, which the milter unfolds before verification.
-  """
-  full_line = f"{header_name}: {header_value}"
-  if len(full_line) <= 76:
-    return full_line
-  first_line = full_line[:76]
-  remaining = full_line[76:]
-  lines = [first_line]
-  while remaining:
-    chunk = remaining[:75]
-    lines.append("\t" + chunk)
-    remaining = remaining[75:]
-  return "\r\n".join(lines)
+  if lowercase_header_name == "hardware-trust-proof":
+    # The Hardware-Trust-Proof ABNF explicitly permits transport FWS at any
+    # position in the SD-JWT serialization, so fixed-size chunks are legal.
+    first_line_prefix = f"{header_name}: "
+    folded_physical_lines = []
+    remaining_encoded_value = header_value
+    next_line_prefix = first_line_prefix
+    while remaining_encoded_value:
+      available_character_count = preferred_physical_line_length - len(next_line_prefix)
+      encoded_value_chunk = remaining_encoded_value[:available_character_count]
+      folded_physical_lines.append(next_line_prefix + encoded_value_chunk)
+      remaining_encoded_value = remaining_encoded_value[len(encoded_value_chunk):]
+      next_line_prefix = " "
+    if not folded_physical_lines:
+      folded_physical_lines = [first_line_prefix]
+  elif lowercase_header_name == "hardware-attestation":
+    # Structured fields are split at semicolon tag boundaries. Only h= colon
+    # separators and the chain=/bind= encoded values permit internal FWS.
+    parameter_segments = [segment.strip(" \t") for segment in header_value.split(";")]
+    if any(not segment or "=" not in segment for segment in parameter_segments):
+      raise ValueError("Hardware-Attestation contains an invalid parameter segment")
+    folded_physical_lines = []
+    for parameter_segment_index, parameter_segment in enumerate(parameter_segments):
+      parameter_name, parameter_value = parameter_segment.split("=", 1)
+      physical_line_prefix = f"{header_name}: " if parameter_segment_index == 0 else " "
+      parameter_physical_lines = []
+      if parameter_name == "h":
+        signed_header_names = parameter_value.split(":")
+        if any(not signed_header_name for signed_header_name in signed_header_names):
+          raise ValueError("Hardware-Attestation h parameter contains an empty field name")
+        current_physical_line = physical_line_prefix + "h=" + signed_header_names[0]
+        for signed_header_name in signed_header_names[1:]:
+          next_header_name_with_separator = ":" + signed_header_name
+          if len(current_physical_line) + len(next_header_name_with_separator) <= preferred_physical_line_length:
+            current_physical_line += next_header_name_with_separator
+          else:
+            parameter_physical_lines.append(current_physical_line + ":")
+            current_physical_line = " " + signed_header_name
+        parameter_physical_lines.append(current_physical_line)
+      elif parameter_name in ("chain", "bind"):
+        first_encoded_line_prefix = physical_line_prefix + parameter_name + "="
+        remaining_encoded_value = parameter_value
+        next_encoded_line_prefix = first_encoded_line_prefix
+        while remaining_encoded_value:
+          available_character_count = preferred_physical_line_length - len(next_encoded_line_prefix)
+          encoded_value_chunk = remaining_encoded_value[:available_character_count]
+          parameter_physical_lines.append(next_encoded_line_prefix + encoded_value_chunk)
+          remaining_encoded_value = remaining_encoded_value[len(encoded_value_chunk):]
+          next_encoded_line_prefix = " "
+        if not parameter_physical_lines:
+          parameter_physical_lines = [first_encoded_line_prefix]
+      else:
+        parameter_physical_lines = [physical_line_prefix + parameter_segment]
+
+      if parameter_segment_index < len(parameter_segments) - 1:
+        parameter_physical_lines[-1] += ";"
+      folded_physical_lines.extend(parameter_physical_lines)
+  else:
+    full_line = f"{header_name}: {header_value}"
+    if len(full_line) > hard_maximum_physical_line_length:
+      raise ValueError(f"No legal AIRS folding rule is defined for {header_name}")
+    folded_physical_lines = [full_line]
+
+  if any(
+    len(physical_line) > hard_maximum_physical_line_length
+    for physical_line in folded_physical_lines
+  ):
+    raise ValueError(
+      f"Folded {header_name} contains a physical line longer than "
+      f"{hard_maximum_physical_line_length} characters"
+    )
+  return "\r\n".join(folded_physical_lines)
+
+
+def _assemble_hardware_trust_proof_presentation_value(
+  mode2_sd_jwt_proof: AttestationProof,
+) -> Optional[str]:
+  """Assemble the exact Mode-2 value once so Combined Mode signs what is sent."""
+  if not mode2_sd_jwt_proof.sd_jwt:
+    return None
+  sd_jwt_presentation_value = mode2_sd_jwt_proof.sd_jwt
+  for disclosure_b64url in mode2_sd_jwt_proof.sd_jwt_disclosures.values():
+    sd_jwt_presentation_value += "~" + disclosure_b64url
+  if mode2_sd_jwt_proof.sd_jwt_disclosures:
+    sd_jwt_presentation_value += "~"
+  return sd_jwt_presentation_value
 
 
 def _extract_all_envelope_recipient_addresses(
@@ -353,6 +427,8 @@ def send(
   smtp_security: Optional[str] = None,
   smtp_envelope_from: Optional[str] = None,
   deliver: bool = True,
+  signing_device_type: Optional[str] = None,
+  piv_serial_number: Optional[int] = None,
 ) -> SendResult:
   """
   Send an attested email via direct SMTP submission to smtp.mailpal.com.
@@ -504,7 +580,9 @@ def send(
     wire_format_message_bytes, policy=email.policy.compat32,
   )
 
-  _MODE2_REQUIRED_HEADER_NAMES = {"from", "to", "subject", "date", "message-id"}
+  # Email draft: Mode 2 always covers the nine fields (REC-04); a five-field
+  # subset here made every sent Mode 2 nonce mismatch the delivered message.
+  from .attestation import _MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING as _MODE2_REQUIRED_HEADER_NAMES
   wire_format_headers_for_mode2_nonce = {}
   for header_name_key in _MODE2_REQUIRED_HEADER_NAMES:
     header_value_from_wire = parsed_wire_message[header_name_key]
@@ -526,66 +604,116 @@ def send(
   # -- Phase 3: Compute attestation from wire-format bytes --
   mode2_sd_jwt_proof = None
   mode1_direct_attestation_proof = None
+  folded_hardware_trust_proof_header_line = None
 
   if include_attestation:
     include_sd_jwt_mode = attestation_mode in ("sd-jwt", "both")
     include_direct_mode = attestation_mode in ("direct", "both")
+    combined_mode_is_requested = include_sd_jwt_mode and include_direct_mode
 
+    # Mode 1's proof key and Registrar binding come FIRST: in Combined mode the
+    # Mode 2 issuance must carry that key as cnf.jwk (AUD-F47) and must disclose
+    # sub whenever Mode 1 will carry aid (AUD-F48; email draft Combined mode).
+    fetched_binding_jws = None
+    proof_public_key_jwk = None
+    if include_direct_mode:
+      # Phase 3: Use the per-device cert chain if signing with a specific device
+      cert_chain_for_binding_jws = creds.identity_certificate_chain_pem
+      if signing_device_type and creds.device_certificate_chains:
+        for _fp, _chain_data in creds.device_certificate_chains.items():
+          if isinstance(_chain_data, dict) and _chain_data.get("device_type") == signing_device_type:
+            cert_chain_for_binding_jws = _chain_data.get("certificate_chain_pem", cert_chain_for_binding_jws)
+            break
+      if cert_chain_for_binding_jws:
+        proof_public_key_jwk = _extract_public_key_jwk_from_certificate_chain_pem(cert_chain_for_binding_jws)
+      if proof_public_key_jwk and creds.agent_identity_urn:
+        try:
+          from .attestation import _fetch_binding_jws
+          token_for_binding = get_token()
+          binding_auth_headers = {
+            "Authorization": f"Bearer {token_for_binding.access_token}",
+            "User-Agent": USER_AGENT,
+          }
+          api_base = oneid_api_url or creds.api_base_url or "https://1id.com"
+          fetched_binding_jws = _fetch_binding_jws(
+            api_base, binding_auth_headers, proof_public_key_jwk)
+          if fetched_binding_jws:
+            logger.info("Fetched Registrar Binding JWS for Mode 1")
+          else:
+            logger.warning("Binding JWS not available; Mode 1 will lack aid and bind")
+        except Exception as binding_error:
+          logger.warning("Failed to fetch binding JWS: %s", binding_error)
+
+    def _request_and_fold_mode2_proof(cnf_jwk_for_combined_mode, additional_disclosed_claims):
+      requested_disclosed_claims = list(disclosed_claims) if disclosed_claims is not None else ["aid"]
+      for claim_name in additional_disclosed_claims:
+        if claim_name not in requested_disclosed_claims:
+          requested_disclosed_claims.append(claim_name)
+      issued_proof = prepare_attestation(
+        email_headers=wire_format_headers_for_mode2_nonce,
+        body=wire_format_body_bytes,
+        disclosed_claims=requested_disclosed_claims,
+        api_base_url=oneid_api_url,
+        override_session_device_type=signing_device_type,
+        cnf_jwk=cnf_jwk_for_combined_mode,
+      )
+      presentation_value = _assemble_hardware_trust_proof_presentation_value(issued_proof)
+      folded_line = (
+        _fold_long_header_value_for_smtp_transmission("Hardware-Trust-Proof", presentation_value)
+        if presentation_value else None
+      )
+      return issued_proof, folded_line
+
+    mode2_carries_combined_mode_cnf = False
     if include_sd_jwt_mode:
       try:
-        mode2_sd_jwt_proof = prepare_attestation(
-          email_headers=wire_format_headers_for_mode2_nonce,
-          body=wire_format_body_bytes,
-          disclosed_claims=disclosed_claims,
-          api_base_url=oneid_api_url,
-        )
+        if combined_mode_is_requested and proof_public_key_jwk:
+          mode2_sd_jwt_proof, folded_hardware_trust_proof_header_line = _request_and_fold_mode2_proof(
+            proof_public_key_jwk, ["sub"] if fetched_binding_jws else [])
+          mode2_carries_combined_mode_cnf = True
+        else:
+          mode2_sd_jwt_proof, folded_hardware_trust_proof_header_line = _request_and_fold_mode2_proof(None, [])
       except Exception as mode2_error:
         logger.warning("Mode 2 (SD-JWT) attestation failed: %s", mode2_error)
+        mode2_sd_jwt_proof, folded_hardware_trust_proof_header_line = None, None
+
+    if folded_hardware_trust_proof_header_line:
+      # Combined Mode must feed the exact emitted, folded Mode-2 value into
+      # Mode 1 before the Hardware-Attestation signature is calculated.
+      wire_format_all_headers_for_mode1["hardware-trust-proof"] = (
+        folded_hardware_trust_proof_header_line.split(":", 1)[1]
+      )
 
     if include_direct_mode:
       try:
-        from .attestation import prepare_direct_hardware_attestation, _fetch_binding_jws
-        fetched_binding_jws = None
-        if creds.identity_certificate_chain_pem and creds.agent_identity_urn:
-          try:
-            token_for_binding = get_token()
-            binding_auth_headers = {
-              "Authorization": f"Bearer {token_for_binding.access_token}",
-              "User-Agent": USER_AGENT,
-            }
-            proof_public_key_jwk = _extract_public_key_jwk_from_certificate_chain_pem(
-              creds.identity_certificate_chain_pem)
-            if proof_public_key_jwk:
-              api_base = oneid_api_url or creds.api_base_url or "https://1id.com"
-              fetched_binding_jws = _fetch_binding_jws(
-                api_base, binding_auth_headers, proof_public_key_jwk)
-              if fetched_binding_jws:
-                logger.info("Fetched Registrar Binding JWS for Mode 1")
-              else:
-                logger.warning("Binding JWS not available; Mode 1 will lack bind parameter")
-          except Exception as binding_error:
-            logger.warning("Failed to fetch binding JWS: %s", binding_error)
+        from .attestation import prepare_direct_hardware_attestation
         mode1_direct_attestation_proof = prepare_direct_hardware_attestation(
           email_headers=wire_format_all_headers_for_mode1,
           body=wire_format_body_bytes,
           binding_jws=fetched_binding_jws,
+          override_signing_device_type=signing_device_type,
+          piv_serial_number=piv_serial_number,
         )
       except Exception as mode1_error:
         logger.warning("Mode 1 (direct) attestation failed: %s", mode1_error)
+
+    # INV-E3: a Mode 2 proof carrying the Combined-mode cnf must never travel
+    # without its Mode 1 (verifiers must reject that rather than degrade), so
+    # if Mode 1 failed, replace it with a standalone Mode 2 (cnf absent).
+    if mode2_carries_combined_mode_cnf and mode1_direct_attestation_proof is None:
+      try:
+        mode2_sd_jwt_proof, folded_hardware_trust_proof_header_line = _request_and_fold_mode2_proof(None, [])
+      except Exception as mode2_retry_error:
+        logger.warning("Standalone Mode 2 fallback failed: %s", mode2_retry_error)
+        mode2_sd_jwt_proof, folded_hardware_trust_proof_header_line = None, None
 
   # -- Phase 4: Build attestation header lines for injection --
   attestation_header_lines_to_inject: List[str] = []
 
   if mode2_sd_jwt_proof:
-    if mode2_sd_jwt_proof.sd_jwt:
-      sd_jwt_presentation_value = mode2_sd_jwt_proof.sd_jwt
-      if mode2_sd_jwt_proof.sd_jwt_disclosures:
-        for disclosure_b64url in mode2_sd_jwt_proof.sd_jwt_disclosures.values():
-          sd_jwt_presentation_value += "~" + disclosure_b64url
-        sd_jwt_presentation_value += "~"
-      attestation_header_lines_to_inject.append(
-        _fold_long_header_value_for_smtp_transmission("Hardware-Trust-Proof", sd_jwt_presentation_value)
-      )
+    if folded_hardware_trust_proof_header_line:
+      # Mode 2 is emitted first because the following Mode-1 proof covers it.
+      attestation_header_lines_to_inject.append(folded_hardware_trust_proof_header_line)
     if mode2_sd_jwt_proof.contact_token:
       attestation_header_lines_to_inject.append(
         f"X-1ID-Contact-Token: {mode2_sd_jwt_proof.contact_token}"
@@ -757,4 +885,3 @@ def get_contact_token(
 
   contact_token_value, _ = _fetch_contact_token(api_base_url, auth_headers)
   return contact_token_value
-

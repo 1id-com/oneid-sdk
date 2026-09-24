@@ -52,12 +52,14 @@ identity = oneid.enroll(request_tier="virtual")
 
 ## Key algorithms
 
-Like SSH, agents can choose their preferred key algorithm for declared-tier enrollment:
+Like SSH, agents can choose their preferred key algorithm for declared-tier enrollment.
+Only ECDSA P-256 (the default) and RSA keys can also sign email Hardware-Attestation
+(Mode 1) proofs; Ed25519 and P-384 keys work for authentication only:
 
 ```python
-identity = oneid.enroll(request_tier="declared", key_algorithm="ed25519")     # default, strongest
-identity = oneid.enroll(request_tier="declared", key_algorithm="ecdsa-p384")  # NIST P-384
-identity = oneid.enroll(request_tier="declared", key_algorithm="rsa-4096")    # RSA compat
+identity = oneid.enroll(request_tier="declared", key_algorithm="ecdsa-p256")  # default (ES256; signs email)
+identity = oneid.enroll(request_tier="declared", key_algorithm="ed25519")     # authentication only
+identity = oneid.enroll(request_tier="declared", key_algorithm="rsa-4096")    # RSA (RS256; signs email)
 ```
 
 ## Installation

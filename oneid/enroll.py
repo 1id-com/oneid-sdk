@@ -111,7 +111,9 @@ def enroll(
           Handles are non-transferable and non-reissuable.
 
       key_algorithm: Optional. Key algorithm for declared-tier enrollment.
-          Default: 'ed25519' (strongest, fastest, smallest keys).
+          Default: 'ecdsa-p256' (the only software key that can also sign
+          Version 1 Mode 1 email proofs; 'ed25519' and 'ecdsa-p384' work for
+          authentication but cannot sign Mode 1 email).
           Ignored for HSM tiers (the HSM determines the algorithm).
 
       api_base_url: Optional. Override the API base URL (for testing/staging).
@@ -814,10 +816,10 @@ def _enroll_hsm_tier(
 
   This uses the Go binary (oneid-enroll) to:
   1. Detect available HSMs
-  2. Extract attestation data (may require setup-tbs first on Windows)
-  3. Send attestation to server
-  4. Receive and decrypt credential activation challenge
-  5. Send decrypted challenge to server
+  2. Extract attestation data (never elevates)
+  3. Send attestation to server (already enrolled -> TPM-signature re-authentication)
+  4. Prove AK/EK co-residency with import-and-certify (never elevates)
+  5. Send the proof to the server
   6. Receive identity + OAuth2 credentials
   7. Store credentials locally
 
@@ -860,107 +862,93 @@ def _enroll_hsm_tier(
       f"but none are compatible with the '{request_tier.value}' tier."
     )
 
-  # On Windows, TPM ActivateCredential requires elevation. Use ElevatedSession
-  # to combine extract + activate under a single UAC prompt. The session also
-  # runs setup-tbs while elevated, so future sign operations need 0 UAC.
-  # On non-Windows, everything works without elevation.
-  this_enrollment_needs_elevated_session_for_tpm_activate = (
-    platform.system() == "Windows"
-    and selected_hsm.get("type", "tpm") == "tpm"
-  )
-
-  if this_enrollment_needs_elevated_session_for_tpm_activate:
-    from .helper import ElevatedSession
-    elevated_tpm_session = ElevatedSession()
-    elevated_tpm_session.start()
-    logger.info("Elevated session started (1 UAC prompt for entire enrollment)")
-  else:
-    elevated_tpm_session = None
+  # --- No elevation anywhere (tracker C10 R-A) ---
+  # Extraction, "welcome back" re-authentication and new enrollment all run as
+  # the ordinary user: EK/NV reads, transient CreatePrimary, TPM2_Sign and the
+  # import-and-certify proof (Import/Load/Certify) are allowed by Windows to
+  # non-elevated processes. A forgetful agent that enrolls again simply gets
+  # its existing identity back.
+  attestation_data = extract_attestation_data(selected_hsm)
+  api_client = OneIDAPIClient(api_base_url=api_base_url)
 
   try:
-    # Step 3: Extract attestation data
-    if elevated_tpm_session:
-      attestation_data = elevated_tpm_session.extract(
-        hsm_type=selected_hsm.get("type", "tpm"),
-      )
-    else:
-      attestation_data = extract_attestation_data(selected_hsm)
-
-    # Step 4: Begin enrollment with server
-    api_client = OneIDAPIClient(api_base_url=api_base_url)
-    this_is_a_recovery_not_a_new_enrollment = False
-
-    try:
-      begin_response = api_client.enroll_begin(
-        ek_certificate_pem=attestation_data["ek_cert_pem"],
-        ak_public_key_pem=attestation_data.get("ak_public_pem", ""),
-        ak_tpmt_public_b64=attestation_data.get("ak_tpmt_public_b64", ""),
-        ek_public_key_pem=attestation_data.get("ek_public_pem", ""),
-        ek_certificate_chain_pem=attestation_data.get("chain_pem", []),
-        hsm_type=selected_hsm.get("type", "tpm"),
-        operator_email=operator_email,
-        requested_handle=requested_handle,
-      )
-    except AlreadyEnrolledError:
-      logger.info(
-        "Hardware already registered -- attempting identity recovery. "
-        "The hardware IS the identity; a machine that forgot its credentials "
-        "can recover by proving it still has the same TPM."
-      )
-      begin_response = api_client.recover_begin(
-        ek_certificate_pem=attestation_data["ek_cert_pem"],
-        ak_public_key_pem=attestation_data.get("ak_public_pem", ""),
-        ak_tpmt_public_b64=attestation_data.get("ak_tpmt_public_b64", ""),
-        ek_public_key_pem=attestation_data.get("ek_public_pem", ""),
-        ek_certificate_chain_pem=attestation_data.get("chain_pem", []),
-      )
-      this_is_a_recovery_not_a_new_enrollment = True
-
-    # Step 5: Activate credential via TPM
-    session_id_field = (
-      "recovery_session_id"
-      if this_is_a_recovery_not_a_new_enrollment
-      else "enrollment_session_id"
+    begin_response = api_client.enroll_begin(
+      ek_certificate_pem=attestation_data["ek_cert_pem"],
+      ak_public_key_pem=attestation_data.get("ak_public_pem", ""),
+      ak_tpmt_public_b64=attestation_data.get("ak_tpmt_public_b64", ""),
+      ek_public_key_pem=attestation_data.get("ek_public_pem", ""),
+      ek_certificate_chain_pem=attestation_data.get("chain_pem", []),
+      hsm_type=selected_hsm.get("type", "tpm"),
+      operator_email=operator_email,
+      requested_handle=requested_handle,
+    )
+  except AlreadyEnrolledError:
+    logger.info("This TPM is already enrolled -- re-authenticating with a TPM signature (no elevation)")
+    sign_based_begin_response = api_client.recover_begin_sign_based(
+      ek_certificate_pem=attestation_data["ek_cert_pem"],
+      ak_public_key_pem=attestation_data.get("ak_public_pem", ""),
+      ak_tpmt_public_b64=attestation_data.get("ak_tpmt_public_b64", ""),
+      ek_public_key_pem=attestation_data.get("ek_public_pem", ""),
+      ek_certificate_chain_pem=attestation_data.get("chain_pem", []),
+    )
+    from .helper import sign_challenge_with_tpm
+    sign_result = sign_challenge_with_tpm(nonce_b64=sign_based_begin_response["nonce_challenge"])
+    activate_response = api_client.recover_activate_sign_based(
+      recovery_session_id=sign_based_begin_response["recovery_session_id"],
+      signed_nonce_b64=sign_result["signature_b64"],
+    )
+    return _build_identity_from_activate_response(
+      activate_response=activate_response,
+      attestation_data=attestation_data,
+      selected_hsm=selected_hsm,
+      request_tier=request_tier,
+      api_base_url=api_base_url,
+      display_name=display_name,
     )
 
-    if elevated_tpm_session:
-      decrypted_credential = elevated_tpm_session.activate(
-        credential_blob_b64=begin_response["credential_blob"],
-        encrypted_secret_b64=begin_response["encrypted_secret"],
-        ak_handle=attestation_data.get("ak_handle", ""),
-      )
-    else:
-      from .helper import activate_credential
-      decrypted_credential = activate_credential(
-        selected_hsm,
-        credential_blob_b64=begin_response["credential_blob"],
-        encrypted_secret_b64=begin_response["encrypted_secret"],
-        ak_handle=attestation_data.get("ak_handle", ""),
-      )
-  finally:
-    if elevated_tpm_session:
-      elevated_tpm_session.close()
-      logger.info("Elevated session closed")
+  from .helper import import_and_certify_wrapped_object_with_tpm
+  proof = import_and_certify_wrapped_object_with_tpm(
+    wrapped_object_public_b64=begin_response["wrapped_object_public"],
+    wrapped_object_duplicate_b64=begin_response["wrapped_object_duplicate"],
+    wrapped_object_in_sym_seed_b64=begin_response["wrapped_object_in_sym_seed"],
+    certify_nonce_b64=begin_response["certify_nonce"],
+  )
+  activate_response = api_client.enroll_activate(
+    enrollment_session_id=begin_response["enrollment_session_id"],
+    certify_info_b64=proof["certify_info"],
+    certify_signature_b64=proof["certify_signature"],
+  )
+  return _build_identity_from_activate_response(
+    activate_response=activate_response,
+    attestation_data=attestation_data,
+    selected_hsm=selected_hsm,
+    request_tier=request_tier,
+    api_base_url=api_base_url,
+    display_name=display_name,
+  )
 
-  # Step 6: Complete enrollment (or recovery) with server
-  if this_is_a_recovery_not_a_new_enrollment:
-    activate_response = api_client.recover_activate(
-      recovery_session_id=begin_response[session_id_field],
-      decrypted_credential=decrypted_credential,
-    )
-    logger.info(
-      "Identity recovered: %s (the hardware proved it is the same machine)",
-      activate_response.get("identity", {}).get("agent_id", "unknown"),
-    )
-  else:
-    activate_response = api_client.enroll_activate(
-      enrollment_session_id=begin_response[session_id_field],
-      decrypted_credential=decrypted_credential,
-    )
 
-  # Step 7: Store credentials and return Identity
+def _build_identity_from_activate_response(
+  activate_response: dict,
+  attestation_data: dict,
+  selected_hsm: dict,
+  request_tier: "TrustTier",
+  api_base_url: str,
+  display_name: str | None,
+) -> "Identity":
+  """Store credentials and build an Identity from a server activate response.
+
+  Shared by the sign-based recovery path (zero elevation) and the
+  MakeCredential path (may require elevation). Both produce the same
+  activate_response shape, so the credential-storage + Identity
+  construction logic is identical.
+  """
   identity_data = activate_response.get("identity", {})
   credentials_data = activate_response.get("credentials", {})
+  message_for_agent = activate_response.get("message_for_agent")
+  if message_for_agent:
+    # Shown to the agent: who it is, its handle and handle status (tracker C11).
+    logger.info("%s", message_for_agent)
 
   canonical_id = identity_data.get("agent_id", identity_data.get("canonical_id", ""))
   agent_identity_urn = identity_data.get("agent_identity_urn", "")
@@ -974,7 +962,7 @@ def _enroll_hsm_tier(
     token_endpoint=credentials_data.get("token_endpoint", f"{api_base_url}/realms/agents/protocol/openid-connect/token"),
     api_base_url=api_base_url,
     trust_tier=trust_tier_str,
-    key_algorithm="tpm-ak",  # TPM-managed key
+    key_algorithm="tpm-ak",
     hsm_key_reference=attestation_data.get("ak_handle"),
     enrolled_at=enrolled_at_str,
     display_name=display_name,
@@ -983,7 +971,6 @@ def _enroll_hsm_tier(
   )
   save_credentials(stored_credentials)
 
-  # Check if agent requested a vanity handle and inform them about payment
   if "requested_handle" in activate_response:
     handle_info = activate_response["requested_handle"]
     logger.info("Vanity handle requested: %s", handle_info.get("handle"))
@@ -1019,9 +1006,11 @@ def _enroll_hsm_tier(
     hsm_manufacturer=selected_hsm.get("manufacturer"),
     enrolled_at=enrolled_at,
     device_count=identity_data.get("device_count", 1),
-    key_algorithm=KeyAlgorithm.RSA_2048,  # TPM AK is typically RSA-2048
+    key_algorithm=KeyAlgorithm.RSA_2048,
     agent_identity_urn=agent_identity_urn or None,
     display_name=display_name,
+    message_for_agent=message_for_agent,
+    handle_summary=activate_response.get("handle_summary"),
   )
 
 

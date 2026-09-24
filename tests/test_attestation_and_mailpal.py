@@ -62,6 +62,14 @@ _SAMPLE_EMAIL_HEADERS = {
 # Tests: RFC Section 5.3 message-binding nonce computation
 # ---------------------------------------------------------------------------
 
+# Email draft (2026-09-24): Mode 1 h= always names these nine fields; the
+# second copy oversigns them so an added instance breaks verification.
+_NINE_ALWAYS_COVERED_FIELDS_LISTED_TWICE_FOR_OVERSIGNED_H_TAG = (
+  "from:to:subject:date:message-id:reply-to:mime-version:content-type:content-transfer-encoding:"
+  "from:to:subject:date:message-id:reply-to:mime-version:content-type:content-transfer-encoding"
+)
+
+
 class TestDkimRelaxedHeaderCanonicalization:
   """Verify DKIM relaxed header canonicalization per RFC 6376 Section 3.4.2."""
 
@@ -111,10 +119,11 @@ class TestDkimSimpleBodyCanonicalization:
 class TestCanonicaliseHeadersForMessageBinding:
   """Verify the full header canonicalization for message-binding nonce."""
 
-  def test_requires_minimum_headers(self):
+  def test_absent_always_covered_fields_contribute_nothing_and_do_not_raise(self):
+    # Email draft: all nine fields are always covered; an absent one is fine.
     from oneid.attestation import canonicalise_headers_for_message_binding
-    with pytest.raises(ValueError, match="Missing required email header"):
-      canonicalise_headers_for_message_binding({"From": "a@b.com"})
+    result = canonicalise_headers_for_message_binding({"From": "a@b.com"})
+    assert result == b"from:a@b.com\r\nhardware-trust-proof:"
 
   def test_produces_bytes_with_required_headers(self):
     from oneid.attestation import canonicalise_headers_for_message_binding
@@ -285,10 +294,11 @@ def _generate_test_certificate_chain_pem():
 class TestCanonicaliseHeadersForDirectAttestation:
   """Verify header canonicalization for Mode 1 (Hardware-Attestation self-reference)."""
 
-  def test_requires_minimum_headers(self):
+  def test_absent_always_covered_fields_contribute_nothing_and_do_not_raise(self):
+    # Email draft: all nine fields are always covered; an absent one is fine.
     from oneid.attestation import canonicalise_headers_for_direct_attestation
-    with pytest.raises(ValueError, match="Missing required email header"):
-      canonicalise_headers_for_direct_attestation({"From": "a@b.com"})
+    result = canonicalise_headers_for_direct_attestation({"From": "a@b.com"})
+    assert result == b"from:a@b.com\r\nhardware-attestation:\r\n"
 
   def test_self_references_hardware_attestation_not_trust_proof(self):
     from oneid.attestation import canonicalise_headers_for_direct_attestation
@@ -297,12 +307,12 @@ class TestCanonicaliseHeadersForDirectAttestation:
     assert "hardware-attestation:" in decoded
     assert "hardware-trust-proof" not in decoded
 
-  def test_hardware_attestation_header_is_last_without_trailing_crlf(self):
+  def test_hardware_attestation_header_is_last_with_dkim2_required_trailing_crlf(self):
     from oneid.attestation import canonicalise_headers_for_direct_attestation
     result = canonicalise_headers_for_direct_attestation(_SAMPLE_EMAIL_HEADERS)
     decoded = result.decode("utf-8")
-    assert decoded.endswith("hardware-attestation: ")
-    assert not decoded.endswith("hardware-attestation: \r\n")
+    # DKIM2 -06 Section 9.6 retains the signature field's final CRLF.
+    assert decoded.endswith("hardware-attestation:\r\n")
 
   def test_includes_header_value_in_self_reference(self):
     from oneid.attestation import canonicalise_headers_for_direct_attestation
@@ -311,7 +321,99 @@ class TestCanonicaliseHeadersForDirectAttestation:
       hardware_attestation_header_value_without_chain="v=1; typ=TPM; alg=RS256; chain=",
     )
     decoded = result.decode("utf-8")
-    assert decoded.endswith("hardware-attestation: v=1; typ=TPM; alg=RS256; chain=")
+    # DKIM2 signature-field canonicalization deletes every WSP character.
+    assert decoded.endswith("hardware-attestation:v=1;typ=TPM;alg=RS256;chain=\r\n")
+
+  def test_self_reference_folded_and_unfolded_forms_are_identical(self):
+    from oneid.attestation import (
+      canonicalise_hardware_attestation_self_reference_using_dkim2_signature_rules,
+    )
+    unfolded_value = "v=1; typ=TPM; alg=RS256; chain=; future=alpha"
+    folded_value = "v=1;\r\n typ=TPM; alg=RS256;\r\n chain=; future=alpha"
+    # DKIM2 Section 9.6 deletes the continuation WSP after unfolding.
+    assert canonicalise_hardware_attestation_self_reference_using_dkim2_signature_rules(
+      folded_value
+    ) == canonicalise_hardware_attestation_self_reference_using_dkim2_signature_rules(
+      unfolded_value
+    )
+
+  def test_unknown_extension_tag_is_cryptographically_covered(self):
+    from oneid.attestation import canonicalise_headers_for_direct_attestation
+    without_extension = canonicalise_headers_for_direct_attestation(
+      _SAMPLE_EMAIL_HEADERS,
+      hardware_attestation_header_value_without_chain="v=1; typ=TPM; chain=",
+    )
+    with_extension = canonicalise_headers_for_direct_attestation(
+      _SAMPLE_EMAIL_HEADERS,
+      hardware_attestation_header_value_without_chain=(
+        "v=1; typ=TPM; chain=; future=alpha"
+      ),
+    )
+    assert without_extension != with_extension
+
+  def test_combined_mode_hardware_trust_proof_is_selected_and_oversigned(self):
+    from oneid.attestation import canonicalise_headers_for_direct_attestation
+    combined_headers = dict(_SAMPLE_EMAIL_HEADERS)
+    combined_headers["Hardware-Trust-Proof"] = "token~disclosure~"
+    canonicalised = canonicalise_headers_for_direct_attestation(combined_headers).decode("utf-8")
+    # Deliberate duplicate h= entries oversign singleton fields so later
+    # insertion of a second instance is detectable by bottom-up selection.
+    assert canonicalised.count("hardware-trust-proof:token~disclosure~\r\n") == 1
+
+  def test_repeated_header_instances_are_selected_bottom_up_and_consumed_once(self):
+    from oneid.attestation import _select_headers_bottom_up_per_dkim
+    ordered_header_pairs = [
+      ("X-Trace", "top-added"),
+      ("Subject", "example"),
+      ("X-Trace", "bottom-added"),
+    ]
+    selected = _select_headers_bottom_up_per_dkim(
+      ["x-trace", "x-trace", "x-trace"], ordered_header_pairs
+    )
+    assert selected == [
+      ("X-Trace", "bottom-added"),
+      ("X-Trace", "top-added"),
+      None,
+    ]
+
+
+class TestProductionAirsHeaderFolding:
+  def test_long_chain_folds_only_inside_permitted_encoded_value(self):
+    from oneid.mailpal import _fold_long_header_value_for_smtp_transmission
+    header_value = (
+      "v=1; typ=TPM; alg=RS256; h=from:to:subject:date:message-id; "
+      "bh=abc123; ts=1710849600; chain=" + "A" * 2400
+    )
+    folded_header = _fold_long_header_value_for_smtp_transmission(
+      "Hardware-Attestation", header_value
+    )
+    physical_lines = folded_header.split("\r\n")
+    assert all(len(physical_line) <= 998 for physical_line in physical_lines)
+    assert all(
+      physical_line.startswith(("Hardware-Attestation:", " "))
+      for physical_line in physical_lines
+    )
+    assert "messag\r\n e-id" not in folded_header
+    assert "chain=" in folded_header
+
+  def test_h_list_folds_at_colon_separator_without_splitting_names(self):
+    from oneid.mailpal import _fold_long_header_value_for_smtp_transmission
+    signed_names = ":".join(["x-complete-header-name-" + str(index) for index in range(20)])
+    folded_header = _fold_long_header_value_for_smtp_transmission(
+      "Hardware-Attestation",
+      f"v=1; typ=TPM; alg=RS256; h={signed_names}; bh=abc; ts=1; chain=QUJD",
+    )
+    assert ":\r\n " in folded_header
+    assert all(len(physical_line) <= 998 for physical_line in folded_header.split("\r\n"))
+
+  def test_long_mode2_value_uses_its_explicit_transport_fws_rule(self):
+    from oneid.mailpal import _fold_long_header_value_for_smtp_transmission
+    presentation = "a" * 1500 + "~" + "b" * 300
+    folded_header = _fold_long_header_value_for_smtp_transmission(
+      "Hardware-Trust-Proof", presentation
+    )
+    assert "\r\n " in folded_header
+    assert all(len(physical_line) <= 998 for physical_line in folded_header.split("\r\n"))
 
 
 class TestComputeAttestationInputForDirectMode:
@@ -482,6 +584,28 @@ class TestDerEncodingHelpers:
 class TestBuildCmsSignedData:
   """Test CMS SignedData construction for Mode 1."""
 
+  @pytest.mark.parametrize(("rfc_alg", "expected_signature_algorithm_identifier_hex"), [
+    ("RS256", "300d06092a864886f70d01010b0500"),
+    ("ES256", "300a06082a8648ce3d040302"),
+    ("PS256", "304106092a864886f70d01010a3034a00f300d06096086480165030402010500"
+              "a11c301a06092a864886f70d010108300d06096086480165030402010500a203020120"),
+  ])
+  def test_algorithm_identifiers_match_the_email_draft_cms_algorithm_mapping_aud_f23(
+    self, rfc_alg, expected_signature_algorithm_identifier_hex,
+  ):
+    # RS256 NULL params, ES256 none, PS256 explicit PSS params; SHA-256 digest
+    # AlgorithmIdentifier with absent params in digestAlgorithms and SignerInfo.
+    from oneid.attestation import build_cms_signed_data_for_direct_attestation
+    chain_pem, _, _ = _generate_test_certificate_chain_pem()
+    cms_der = build_cms_signed_data_for_direct_attestation(
+      signature_bytes=b"\x01" * 64,
+      certificate_chain_pem=chain_pem,
+      signature_algorithm_rfc_name=rfc_alg,
+    )
+    assert bytes.fromhex(expected_signature_algorithm_identifier_hex) in cms_der
+    assert cms_der.count(bytes.fromhex("300b0609608648016503040201")) == 2
+    assert bytes.fromhex("300c06082a8648ce3d0403020500") not in cms_der
+
   def test_produces_valid_der_bytes(self):
     from oneid.attestation import build_cms_signed_data_for_direct_attestation
     chain_pem, _, _ = _generate_test_certificate_chain_pem()
@@ -638,7 +762,7 @@ class TestEndToEndMode1SignThenVerify:
     headers = dict(_SAMPLE_EMAIL_HEADERS)
     timestamp = 1711022400
 
-    signed_header_names = "from:to:subject:date:message-id:from:to:subject:date:message-id"
+    signed_header_names = _NINE_ALWAYS_COVERED_FIELDS_LISTED_TWICE_FOR_OVERSIGNED_H_TAG
     bh_raw = hashlib.sha256(body).digest()
     bh_b64url = base64.urlsafe_b64encode(bh_raw).rstrip(b"=").decode("ascii")
 
@@ -735,7 +859,7 @@ class TestEndToEndMode1SignThenVerify:
     headers = dict(_SAMPLE_EMAIL_HEADERS)
     timestamp = 1711022400
 
-    signed_header_names = "from:to:subject:date:message-id:from:to:subject:date:message-id"
+    signed_header_names = _NINE_ALWAYS_COVERED_FIELDS_LISTED_TWICE_FOR_OVERSIGNED_H_TAG
     bh_raw = hashlib.sha256(body).digest()
     bh_b64url = base64.urlsafe_b64encode(bh_raw).rstrip(b"=").decode("ascii")
 
@@ -779,6 +903,174 @@ class TestEndToEndMode1SignThenVerify:
 
     assert result.is_valid, f"RSA verification failed: {result.failure_reasons}"
     assert result.alg == "RS256"
+
+  def test_folded_chain_round_trips_then_unknown_tag_or_reordered_tags_are_rejected(self):
+    """Legal chain FWS is transport-only; unknown tags and reordering are malformed (AUD-F25/F74)."""
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(
+      os.path.dirname(__file__), "..", "..", "hw-attest-verify"))
+
+    from oneid.attestation import (
+      _sign_attestation_input_with_software_key,
+      build_cms_signed_data_for_direct_attestation,
+      compute_attestation_input_for_direct_mode,
+    )
+    from oneid.mailpal import _fold_long_header_value_for_smtp_transmission
+    from hw_attest_verify.mode1 import verify_hardware_attestation
+
+    chain_pem, private_key_pem, _, _ = (
+      _generate_ec_test_cert_chain_for_software_declared_tier())
+    body = b"Folded Mode 1 body.\r\n"
+    headers = dict(_SAMPLE_EMAIL_HEADERS)
+    timestamp = 1711022400
+    signed_header_names = _NINE_ALWAYS_COVERED_FIELDS_LISTED_TWICE_FOR_OVERSIGNED_H_TAG
+    body_hash_base64url = base64.urlsafe_b64encode(
+      hashlib.sha256(body).digest()
+    ).rstrip(b"=").decode("ascii")
+    header_template_with_empty_chain = (
+      f"v=1; typ=SFT; alg=ES256; h={signed_header_names}; "
+      f"bh={body_hash_base64url}; ts={timestamp}; chain="
+    )
+    attestation_input = compute_attestation_input_for_direct_mode(
+      email_headers=headers,
+      body_bytes=body,
+      attestation_timestamp_unix=timestamp,
+      hardware_attestation_header_value_without_chain=header_template_with_empty_chain,
+    )
+    signature_bytes = _sign_attestation_input_with_software_key(
+      attestation_input, private_key_pem
+    )
+    cms_der = build_cms_signed_data_for_direct_attestation(
+      signature_bytes=signature_bytes,
+      certificate_chain_pem=chain_pem,
+      signature_algorithm_rfc_name="ES256",
+    )
+    emitted_header_value = header_template_with_empty_chain + base64.b64encode(
+      cms_der
+    ).decode("ascii")
+    folded_header_field = _fold_long_header_value_for_smtp_transmission(
+      "Hardware-Attestation", emitted_header_value
+    )
+    folded_header_value = folded_header_field.split(":", 1)[1]
+
+    valid_result = verify_hardware_attestation(
+      header_value=folded_header_value,
+      email_headers=headers,
+      body=body,
+      allow_self_signed=True,
+      reference_time_unix=timestamp,
+    )
+    assert valid_result.is_valid, valid_result.failure_reasons
+
+    modified_extension_result = verify_hardware_attestation(
+      header_value=folded_header_value + "; future=alpha",
+      email_headers=headers,
+      body=body,
+      allow_self_signed=True,
+      reference_time_unix=timestamp,
+    )
+    assert not modified_extension_result.is_valid
+    assert any(
+      "Unrecognized tag 'future'" in failure_reason
+      for failure_reason in modified_extension_result.failure_reasons
+    )
+
+    reordered_tag_result = verify_hardware_attestation(
+      header_value=emitted_header_value.replace(
+        "typ=SFT; alg=ES256", "alg=ES256; typ=SFT"
+      ),
+      email_headers=headers,
+      body=body,
+      allow_self_signed=True,
+      reference_time_unix=timestamp,
+    )
+    assert not reordered_tag_result.is_valid
+    assert any(
+      "required order" in failure_reason
+      for failure_reason in reordered_tag_result.failure_reasons
+    )
+
+  def test_combined_mode_removing_or_changing_hardware_trust_proof_breaks_mode1(self):
+    """Mode 1 covers the complete Mode-2 field in Combined Mode."""
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(
+      os.path.dirname(__file__), "..", "..", "hw-attest-verify"))
+
+    from oneid.attestation import (
+      _sign_attestation_input_with_software_key,
+      build_cms_signed_data_for_direct_attestation,
+      compute_attestation_input_for_direct_mode,
+    )
+    from hw_attest_verify.mode1 import verify_hardware_attestation
+
+    chain_pem, private_key_pem, _, _ = (
+      _generate_ec_test_cert_chain_for_software_declared_tier())
+    body = b"Combined Mode body.\r\n"
+    headers = dict(_SAMPLE_EMAIL_HEADERS)
+    headers["Hardware-Trust-Proof"] = "header.payload.signature~disclosure~"
+    timestamp = 1711022400
+    signed_header_names = (
+      "from:to:subject:date:message-id:reply-to:mime-version:content-type:content-transfer-encoding:hardware-trust-proof:"
+      "from:to:subject:date:message-id:reply-to:mime-version:content-type:content-transfer-encoding:hardware-trust-proof"
+    )
+    body_hash_base64url = base64.urlsafe_b64encode(
+      hashlib.sha256(body).digest()
+    ).rstrip(b"=").decode("ascii")
+    empty_chain_header_value = (
+      f"v=1; typ=SFT; alg=ES256; h={signed_header_names}; "
+      f"bh={body_hash_base64url}; ts={timestamp}; chain="
+    )
+    attestation_input = compute_attestation_input_for_direct_mode(
+      email_headers=headers,
+      body_bytes=body,
+      attestation_timestamp_unix=timestamp,
+      hardware_attestation_header_value_without_chain=empty_chain_header_value,
+    )
+    signature_bytes = _sign_attestation_input_with_software_key(
+      attestation_input, private_key_pem
+    )
+    cms_der = build_cms_signed_data_for_direct_attestation(
+      signature_bytes=signature_bytes,
+      certificate_chain_pem=chain_pem,
+      signature_algorithm_rfc_name="ES256",
+    )
+    full_header_value = empty_chain_header_value + base64.b64encode(cms_der).decode("ascii")
+    ordered_header_pairs = list(headers.items())
+
+    initial_result = verify_hardware_attestation(
+      header_value=full_header_value,
+      email_headers=headers,
+      body=body,
+      ordered_header_pairs=ordered_header_pairs,
+      allow_self_signed=True,
+      reference_time_unix=timestamp,
+    )
+    assert initial_result.is_valid, initial_result.failure_reasons
+
+    changed_headers = dict(headers)
+    changed_headers["Hardware-Trust-Proof"] = "header.payload.signature~changed~"
+    changed_result = verify_hardware_attestation(
+      header_value=full_header_value,
+      email_headers=changed_headers,
+      body=body,
+      ordered_header_pairs=list(changed_headers.items()),
+      allow_self_signed=True,
+      reference_time_unix=timestamp,
+    )
+    assert not changed_result.is_valid
+
+    removed_headers = dict(_SAMPLE_EMAIL_HEADERS)
+    removed_result = verify_hardware_attestation(
+      header_value=full_header_value,
+      email_headers=removed_headers,
+      body=body,
+      ordered_header_pairs=list(removed_headers.items()),
+      allow_self_signed=True,
+      reference_time_unix=timestamp,
+    )
+    assert not removed_result.is_valid
 
 
 class TestCmsSignedDataHasNoSignedAttrs:
@@ -950,9 +1242,10 @@ class TestPrepareAttestation:
     mock_fetch_contact.return_value = (None, None)
 
     from oneid.attestation import prepare_attestation
-    proof = prepare_attestation(content_digest="sha256:abc123")
+    # AUD-F83: a pre-computed digest must be a real SHA-256 value.
+    proof = prepare_attestation(content_digest="sha256:abababababababababababababababababababababababababababababababab")
 
-    assert proof.content_digest == "sha256:abc123"
+    assert proof.content_digest == "sha256:abababababababababababababababababababababababababababababababab"
 
   def test_rejects_both_content_and_digest(self):
     from oneid.attestation import prepare_attestation
@@ -1010,7 +1303,8 @@ class TestPrepareAttestation:
     mock_fetch_sd_jwt.return_value = ("jwt", {})
 
     from oneid.attestation import prepare_attestation
-    proof = prepare_attestation(include_contact_token=False)
+    # AUD-F83: an SD-JWT request needs content to bind to.
+    proof = prepare_attestation(content=b"data", include_contact_token=False)
 
     mock_fetch_contact.assert_not_called()
     assert proof.contact_token is None
@@ -1070,6 +1364,63 @@ class TestMailpalSend:
     assert "Hardware-Trust-Proof:" in sent_text
     assert "signed.sd.jwt" in sent_text
     assert "X-1ID-Contact-Token: a1b2c3d4" in sent_text
+
+  @patch("oneid.attestation.prepare_direct_hardware_attestation")
+  @patch("oneid.mailpal.load_credentials")
+  @patch("oneid.mailpal.prepare_attestation")
+  def test_combined_mode_generates_and_injects_mode2_before_mode1(
+    self,
+    mock_prepare_mode2,
+    mock_load_creds,
+    mock_prepare_mode1,
+  ):
+    credentials = _mock_credentials()
+    credentials.identity_certificate_chain_pem = None
+    credentials.agent_identity_urn = None
+    mock_load_creds.return_value = credentials
+
+    mode2_proof = MagicMock()
+    mode2_proof.sd_jwt = "header.payload.signature"
+    mode2_proof.sd_jwt_disclosures = {"tier": "disclosure"}
+    mode2_proof.contact_token = None
+    mock_prepare_mode2.return_value = mode2_proof
+
+    def assert_mode2_is_present_before_returning_mode1_proof(
+      email_headers,
+      body,
+      binding_jws=None,
+      **other_keyword_arguments_passed_by_mailpal_send,
+    ):
+      assert "hardware-trust-proof" in email_headers
+      assert "header.payload.signature" in email_headers["hardware-trust-proof"]
+      mode1_proof = MagicMock()
+      mode1_proof.hardware_attestation_header_value = (
+        "v=1; typ=SFT; alg=ES256; "
+        "h=from:to:subject:date:message-id:hardware-trust-proof; "
+        "bh=abc; ts=1; chain=" + "A" * 1600
+      )
+      return mode1_proof
+
+    mock_prepare_mode1.side_effect = assert_mode2_is_present_before_returning_mode1_proof
+
+    from oneid.mailpal import send
+    result = send(
+      to=["recipient@example.com"],
+      subject="Combined",
+      text_body="Combined body",
+      attestation_mode="both",
+      deliver=False,
+    )
+    raw_message = result.rfc5322_message_bytes
+    assert raw_message is not None
+    assert raw_message.index(b"Hardware-Trust-Proof:") < raw_message.index(
+      b"Hardware-Attestation:"
+    )
+    assert b"\r\r\n" not in raw_message
+    assert all(
+      len(physical_line) <= 998
+      for physical_line in raw_message.split(b"\r\n")
+    )
 
   @patch("oneid.mailpal.get_token")
   @patch("oneid.mailpal.load_credentials")

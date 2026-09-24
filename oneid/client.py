@@ -313,24 +313,27 @@ class OneIDAPIClient:
   def enroll_activate(
     self,
     enrollment_session_id: str,
-    decrypted_credential: str,
+    decrypted_credential: str | None = None,
+    certify_info_b64: str | None = None,
+    certify_signature_b64: str | None = None,
   ) -> dict[str, Any]:
-    """Complete TPM/HSM-based enrollment by proving HSM possession.
+    """Complete HSM-based enrollment by proving HSM possession.
 
-    This is the second step. The agent sends back the decrypted credential
-    challenge, proving the AK is inside the TPM/HSM that owns the EK.
-
-    Args:
-        enrollment_session_id: Session ID from enroll_begin().
-        decrypted_credential: Base64-encoded decrypted challenge from the TPM/HSM.
+    TPM: send certify_info_b64 + certify_signature_b64 from the
+    import-and-certify proof (no elevation). PIV/enclave: send the nonce
+    signature as decrypted_credential.
 
     Returns:
-        Server response containing identity, credentials, and initial tokens.
+        Server response containing identity, credentials, initial tokens,
+        message_for_agent and handle_summary.
     """
-    return self._make_request("POST", "/api/v1/enroll/activate", json_body={
-      "enrollment_session_id": enrollment_session_id,
-      "decrypted_credential": decrypted_credential,
-    })
+    body: dict[str, Any] = {"enrollment_session_id": enrollment_session_id}
+    if decrypted_credential is not None:
+      body["decrypted_credential"] = decrypted_credential
+    if certify_info_b64 is not None:
+      body["certify_info"] = certify_info_b64
+      body["certify_signature"] = certify_signature_b64
+    return self._make_request("POST", "/api/v1/enroll/activate", json_body=body)
 
   def recover_begin(
     self,
@@ -357,6 +360,48 @@ class OneIDAPIClient:
       request_body["ek_certificate_chain_pem"] = ek_certificate_chain_pem
 
     return self._make_request("POST", "/api/v1/enroll/recover", json_body=request_body)
+
+  def recover_begin_sign_based(
+    self,
+    ek_certificate_pem: str,
+    ak_public_key_pem: str,
+    ak_tpmt_public_b64: str,
+    ek_public_key_pem: str = "",
+    ek_certificate_chain_pem: list[str] | None = None,
+  ) -> dict[str, Any]:
+    """Begin sign-based TPM identity recovery (NO elevation needed).
+
+    Instead of MakeCredential (which requires ActivateCredential and therefore
+    elevation on Windows), the server issues a random nonce. The client signs
+    it with the TPM AK (userspace operation after one-time setup-tbs) and sends
+    the signature back via recover_activate_sign_based().
+    """
+    request_body: dict[str, Any] = {
+      "ek_certificate_pem": ek_certificate_pem,
+      "ak_public_key_pem": ak_public_key_pem,
+      "ak_tpmt_public_b64": ak_tpmt_public_b64,
+    }
+    if ek_public_key_pem:
+      request_body["ek_public_key_pem"] = ek_public_key_pem
+    if ek_certificate_chain_pem:
+      request_body["ek_certificate_chain_pem"] = ek_certificate_chain_pem
+
+    return self._make_request("POST", "/api/v1/enroll/recover/sign-based", json_body=request_body)
+
+  def recover_activate_sign_based(
+    self,
+    recovery_session_id: str,
+    signed_nonce_b64: str,
+  ) -> dict[str, Any]:
+    """Complete sign-based identity recovery by submitting the AK signature over the nonce.
+
+    The server verifies the signature against the stored AK public key.
+    Returns fresh credentials (rotated client_secret) for the recovered identity.
+    """
+    return self._make_request("POST", "/api/v1/enroll/recover/sign-based/activate", json_body={
+      "enrollment_session_id": recovery_session_id,
+      "decrypted_credential": signed_nonce_b64,
+    })
 
   def recover_begin_piv(
     self,
@@ -397,6 +442,36 @@ class OneIDAPIClient:
         Public identity data (canonical_id, handle, trust_tier, etc.).
     """
     return self._make_request("GET", f"/api/v1/identity/{agent_id}")
+
+  def get_device_certificate_chain(
+    self,
+    device_fingerprint: str,
+    access_token: str,
+  ) -> dict[str, Any]:
+    """Fetch the per-device certificate chain for a specific device.
+
+    Phase 2: Each device bound to an identity has its own certificate chain
+    where the leaf cert's public key matches that device's signing key.
+    """
+    return self._make_request(
+      "GET",
+      f"/api/v1/identity/devices/{device_fingerprint}/certificate",
+      headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+  def get_all_device_certificate_chains(
+    self,
+    access_token: str,
+  ) -> dict[str, Any]:
+    """Fetch all per-device certificate chains for this identity.
+
+    Returns a dict with device_certificate_chains keyed by device fingerprint.
+    """
+    return self._make_request(
+      "GET",
+      "/api/v1/identity/devices/certificates",
+      headers={"Authorization": f"Bearer {access_token}"},
+    )
 
   def get_token_with_client_credentials(
     self,

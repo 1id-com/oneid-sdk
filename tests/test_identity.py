@@ -58,8 +58,8 @@ class TestKeyAlgorithmEnum:
     assert KeyAlgorithm.RSA_2048.value == "rsa-2048"
     assert KeyAlgorithm.RSA_4096.value == "rsa-4096"
 
-  def test_default_is_ed25519(self):
-    assert DEFAULT_KEY_ALGORITHM == KeyAlgorithm.ED25519
+  def test_default_is_ecdsa_p256_which_can_sign_version_1_mode_1_email(self):
+    assert DEFAULT_KEY_ALGORITHM == KeyAlgorithm.ECDSA_P256
 
 
 class TestIdentityDataclass:

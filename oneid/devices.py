@@ -453,8 +453,15 @@ def add(
 
   current_tier = credentials.trust_tier
 
-  if current_tier == "declared" or credentials.hsm_key_reference is None:
-    return _add_device_via_declared_to_hardware_upgrade(
+  if (
+    current_tier == "declared"
+    or credentials.hsm_key_reference is None
+    or device_type == "tpm"
+  ):
+    # A TPM addition uses authenticated bearer identity plus a fresh
+    # MakeCredential/ActivateCredential proof, including when the identity
+    # already has another active hardware binding.
+    return _add_device_using_authenticated_evidence_with_tpm_credential_activation_when_required(
       device_type_preference=device_type,
       credentials=credentials,
     )
@@ -474,16 +481,16 @@ def add(
     )
 
 
-def _add_device_via_declared_to_hardware_upgrade(
+def _add_device_using_authenticated_evidence_with_tpm_credential_activation_when_required(
   device_type_preference: str | None,
   credentials: StoredCredentials,
 ) -> DeviceAddResult:
-  """Add a hardware device to a declared-tier identity (no co-location).
+  """Add hardware using attestation and TPM possession proof when applicable.
 
   1. Detect hardware via Go binary
   2. Extract attestation data via Go binary
-  3. Send attestation to POST /api/v1/identity/devices/add
-  4. Server validates, registers device, upgrades identity
+  3. For TPM, complete begin/ActivateCredential/activate; for PIV, submit once
+  4. Server validates, registers the device, and upgrades when applicable
   5. Update local credentials.json with new tier + HSM reference
   """
   from .helper import detect_available_hsms, extract_attestation_data
@@ -555,12 +562,38 @@ def _add_device_via_declared_to_hardware_upgrade(
     new_hsm_key_reference = attestation_data.get("ak_handle", "transient")
     new_key_algorithm = "tpm-ak"
 
-  response_data = _make_authenticated_request(
-    "POST",
-    "/api/v1/identity/devices/add",
-    json_body=request_body,
-    credentials=credentials,
-  )
+  if hsm_type == "tpm":
+    # TPM addition is a two-step possession proof. A public EK certificate is
+    # evidence, not proof that this client controls the TPM private material.
+    begin_binding_response_data = _make_authenticated_request(
+      "POST",
+      "/api/v1/identity/devices/add/tpm/begin",
+      json_body=request_body,
+      credentials=credentials,
+    )
+    from .helper import activate_credential
+    decrypted_credential_b64 = activate_credential(
+      selected_hsm,
+      credential_blob_b64=begin_binding_response_data["credential_blob"],
+      encrypted_secret_b64=begin_binding_response_data["encrypted_secret"],
+      ak_handle=attestation_data.get("ak_handle", ""),
+    )
+    response_data = _make_authenticated_request(
+      "POST",
+      "/api/v1/identity/devices/add/tpm/activate",
+      json_body={
+        "binding_session_id": begin_binding_response_data["binding_session_id"],
+        "decrypted_credential": decrypted_credential_b64,
+      },
+      credentials=credentials,
+    )
+  else:
+    response_data = _make_authenticated_request(
+      "POST",
+      "/api/v1/identity/devices/add",
+      json_body=request_body,
+      credentials=credentials,
+    )
 
   new_tier = response_data.get("trust_tier", "sovereign" if hsm_type == "tpm" else "portable")
   identity_was_upgraded = response_data.get("identity_upgraded", False)

@@ -387,6 +387,8 @@ def _run_binary_command(
 
 
 def detect_available_hsms() -> list[dict]:
+  # CROSS_IMPL_SYNC: hsm_detect
+  # Implementations: py:oneid/helper.py go:internal/piv/detect.go+tpm/detect.go node:src/helper.ts
   """Detect available hardware security modules via the Go binary.
 
   Runs 'oneid-enroll detect --json' which does NOT require elevation.
@@ -409,6 +411,109 @@ def detect_available_hsms() -> list[dict]:
   except HSMAccessError:
     logger.warning("HSM detection failed, returning empty list")
     return []
+
+
+def detect_available_signing_capability_tiers() -> dict:
+  # CROSS_IMPL_SYNC: tier_detect
+  # Implementations: py:oneid/helper.py node:src/helper.ts
+  """Detect which signing capability tiers are available on this system.
+
+  The 1id SDK supports three tiers of hardware signing, each with different
+  dependency requirements. This function probes all three and reports what
+  is available, so callers (and agents) can choose the best available path.
+
+  Tier A -- Go binary (oneid-enroll):
+    Handles all HSM types (TPM, PIV, Enclave). Requires the compiled binary.
+    Supports --serial/--reader for multi-YubiKey targeting (v1.3.0+).
+    Best choice when available.
+
+  Tier B -- Native Python extensions (pyscard for PIV, tpm2-pytss for TPM):
+    Pure-Python signing without spawning a subprocess. Requires platform-
+    specific native packages to be installed. Currently supports PIV only
+    (pyscard). TPM Tier B (tpm2-pytss or ctypes tbs.dll) is not yet
+    implemented.
+
+  Tier C -- Software-only:
+    No hardware signing. Only software key operations are possible.
+    Always available as a baseline. Useful when no HSM is accessible
+    (e.g. cloud containers, sandboxed agents).
+
+  Returns:
+      Dict with keys:
+        - tier_a_go_binary_is_available: bool
+        - tier_a_go_binary_version: str or None
+        - tier_a_go_binary_path: str or None
+        - tier_b_piv_via_pyscard_is_available: bool
+        - tier_b_tpm_via_native_is_available: bool
+        - tier_b_piv_connected_yubikey_count: int (0 if pyscard unavailable)
+        - tier_c_software_only_is_available: bool (always True)
+        - recommended_piv_tier: "A" | "B" | "C"
+        - recommended_tpm_tier: "A" | "C"
+  """
+  result = {
+    "tier_a_go_binary_is_available": False,
+    "tier_a_go_binary_version": None,
+    "tier_a_go_binary_path": None,
+    "tier_b_piv_via_pyscard_is_available": False,
+    "tier_b_tpm_via_native_is_available": False,
+    "tier_b_piv_connected_yubikey_count": 0,
+    "tier_c_software_only_is_available": True,
+    "recommended_piv_tier": "C",
+    "recommended_tpm_tier": "C",
+  }
+
+  # Tier A: Go binary check
+  try:
+    binary_path = find_binary()
+    if binary_path is not None:
+      version_output = _run_binary_command("version")
+      result["tier_a_go_binary_is_available"] = True
+      result["tier_a_go_binary_version"] = version_output.get("version")
+      result["tier_a_go_binary_path"] = str(binary_path)
+      result["recommended_piv_tier"] = "A"
+      result["recommended_tpm_tier"] = "A"
+  except Exception as go_binary_probe_err:
+    logger.debug("Tier A probe failed: %s", go_binary_probe_err)
+
+  # Tier B PIV: pyscard check
+  try:
+    from smartcard.System import readers as pcsc_list_readers  # noqa: F811
+    all_readers = pcsc_list_readers()
+    result["tier_b_piv_via_pyscard_is_available"] = True
+    # Count YubiKey-like readers specifically
+    yubikey_reader_count = sum(
+      1 for r in all_readers
+      if "yubi" in str(r).lower() or "ccid" in str(r).lower()
+    )
+    result["tier_b_piv_connected_yubikey_count"] = yubikey_reader_count
+    if not result["tier_a_go_binary_is_available"]:
+      result["recommended_piv_tier"] = "B"
+  except ImportError:
+    logger.debug("Tier B PIV: pyscard not installed")
+  except Exception as pyscard_probe_err:
+    logger.debug("Tier B PIV probe failed: %s", pyscard_probe_err)
+
+  # Tier B TPM: native check (tpm2-pytss on Linux, ctypes tbs.dll on Windows)
+  if platform.system() == "Windows":
+    try:
+      import ctypes
+      tbs_dll_handle = ctypes.windll.LoadLibrary("tbs.dll")
+      if tbs_dll_handle is not None:
+        result["tier_b_tpm_via_native_is_available"] = True
+        if not result["tier_a_go_binary_is_available"]:
+          result["recommended_tpm_tier"] = "B"
+    except Exception:
+      logger.debug("Tier B TPM: tbs.dll not loadable")
+  else:
+    try:
+      import tpm2_pytss  # noqa: F401
+      result["tier_b_tpm_via_native_is_available"] = True
+      if not result["tier_a_go_binary_is_available"]:
+        result["recommended_tpm_tier"] = "B"
+    except ImportError:
+      logger.debug("Tier B TPM: tpm2-pytss not installed")
+
+  return result
 
 
 def extract_attestation_data(hsm: dict) -> dict:
@@ -487,6 +592,30 @@ def activate_credential(
     activate_args.extend(["--ak-handle", ak_handle])
   output = _run_binary_command("activate", args=activate_args, timeout_seconds=120.0)
   return output.get("decrypted_credential", "")
+
+
+def import_and_certify_wrapped_object_with_tpm(
+  wrapped_object_public_b64: str,
+  wrapped_object_duplicate_b64: str,
+  wrapped_object_in_sym_seed_b64: str,
+  certify_nonce_b64: str,
+) -> dict:
+  """Enrollment co-residency proof that needs NO elevation (oneid-enroll >= 2.0.0).
+
+  Runs 'oneid-enroll import-certify --json ...': imports the Registrar-wrapped
+  object under the EK, loads it, and certifies it with the AK over the nonce.
+  Windows allows these TPM commands to ordinary users (ActivateCredential it
+  does not), so unattended agents never see a UAC prompt.
+
+  Returns:
+      Dict with certify_info and certify_signature (base64).
+  """
+  return _run_binary_command("import-certify", args=[
+    "--wrapped-object-public", wrapped_object_public_b64,
+    "--wrapped-object-duplicate", wrapped_object_duplicate_b64,
+    "--wrapped-object-in-sym-seed", wrapped_object_in_sym_seed_b64,
+    "--certify-nonce", certify_nonce_b64,
+  ], timeout_seconds=120.0)
 
 
 # ---------------------------------------------------------------------------
@@ -801,7 +930,12 @@ def setup_tbs_for_non_admin_tpm_access() -> dict:
   return _run_binary_command("setup-tbs", args=["--elevated"])
 
 
-def sign_challenge_with_piv(nonce_b64: str) -> dict:
+def sign_challenge_with_piv(
+  nonce_b64: str,
+  piv_serial_number: int | None = None,
+) -> dict:
+  # CROSS_IMPL_SYNC: piv_sign
+  # Implementations: py:oneid/helper.py go:internal/piv/sign.go node:src/helper.ts
   """Sign a challenge nonce using the PIV key in slot 9a -- NO ELEVATION NEEDED.
 
   This is the core of PIV-backed challenge-response during enrollment.
@@ -810,8 +944,24 @@ def sign_challenge_with_piv(nonce_b64: str) -> dict:
 
   PIV slot 9a with pin-policy=NEVER means no human interaction required.
 
+  Uses a tiered fallback strategy:
+
+    Tier A (Go binary): Spawns oneid-enroll with --serial/--reader targeting.
+      Best choice when the Go binary is available. Supports all platforms.
+    Tier B (pyscard): Pure-Python PC/SC signing via GENERAL AUTHENTICATE APDU.
+      Used when multiple YubiKeys are connected, when a specific serial is
+      requested, or as fallback when the Go binary is unavailable/fails.
+    Tier C: Not applicable for PIV (hardware key required).
+
+  When piv_serial_number is provided, Tier B is used directly (it can target
+  a specific device). When multiple keys are detected, Tier B handles
+  selection. For single-key cases, Tier A is tried first with Tier B fallback.
+
   Args:
       nonce_b64: Base64-encoded nonce from the server.
+      piv_serial_number: Specific YubiKey serial to sign with. When None
+          and multiple keys are present, the selection logic picks the
+          most-recently-plugged key that has a slot 9a signing key.
 
   Returns:
       Dict with:
@@ -823,14 +973,79 @@ def sign_challenge_with_piv(nonce_b64: str) -> dict:
       NoHSMError: If no PIV device is accessible.
       HSMAccessError: If signing fails.
   """
-  output = _run_binary_command(
-    "sign",
-    args=[
+  import base64
+
+  # Tier B (pyscard) -- used when serial targeting or multi-key selection needed
+  if piv_serial_number is not None:
+    nonce_bytes = base64.b64decode(nonce_b64)
+    available = enumerate_all_piv_capable_yubikeys_via_pcsc()
+    reader = select_preferred_piv_yubikey_reader_name(
+      available_yubikeys=available,
+      preferred_serial_number=piv_serial_number,
+    )
+    if reader is None:
+      raise NoHSMError(
+        "YubiKey with serial %d not found among %d connected key(s)"
+        % (piv_serial_number, len(available))
+      )
+    return sign_nonce_with_specific_piv_reader_via_pcsc(nonce_bytes, reader)
+
+  # Enumerate keys via Tier B (pyscard) to detect multi-key situations
+  tier_b_piv_via_pyscard_is_available = False
+  available = []
+  try:
+    available = enumerate_all_piv_capable_yubikeys_via_pcsc()
+    tier_b_piv_via_pyscard_is_available = True
+  except Exception:
+    pass
+
+  # Tier B direct: multiple keys require targeted selection (Go binary cannot
+  # enumerate all -- it opens the first one. Even with --serial, we need to
+  # know WHICH serial to pass, which requires enumeration.)
+  if len(available) > 1:
+    nonce_bytes = base64.b64decode(nonce_b64)
+    reader = select_preferred_piv_yubikey_reader_name(
+      available_yubikeys=available,
+    )
+    if reader is None:
+      raise NoHSMError("Multiple YubiKeys detected but none could be selected")
+    return sign_nonce_with_specific_piv_reader_via_pcsc(nonce_bytes, reader)
+
+  # Tier A (Go binary): try first for single-key case
+  tier_a_last_error = None
+  try:
+    go_binary_sign_args = [
       "--nonce", nonce_b64,
       "--type", "yubikey",
-    ],
-  )
-  return output
+    ]
+    if len(available) == 1 and available[0].get("serial_number"):
+      go_binary_sign_args.extend(["--serial", str(available[0]["serial_number"])])
+    return _run_binary_command("sign", args=go_binary_sign_args)
+  except BinaryNotFoundError:
+    tier_a_last_error = "Go binary not found"
+    logger.info("PIV Tier A unavailable (binary not found), falling back to Tier B")
+  except (HSMAccessError, NoHSMError) as tier_a_err:
+    tier_a_last_error = str(tier_a_err)
+    logger.info("PIV Tier A failed (%s), falling back to Tier B", tier_a_err)
+
+  # Tier B fallback: try pyscard direct signing for single-key case
+  if tier_b_piv_via_pyscard_is_available and len(available) == 1:
+    nonce_bytes = base64.b64decode(nonce_b64)
+    return sign_nonce_with_specific_piv_reader_via_pcsc(
+      nonce_bytes, available[0]["reader_name"]
+    )
+
+  # Both tiers exhausted
+  if tier_a_last_error:
+    raise HSMAccessError(
+      "PIV signing failed: Tier A (Go binary): %s; "
+      "Tier B (pyscard): %s"
+      % (
+        tier_a_last_error,
+        "no YubiKeys detected" if not available else "unavailable",
+      )
+    )
+  raise NoHSMError("No PIV signing capability available (no Go binary, no pyscard)")
 
 
 def _find_secure_enclave_helper_binary() -> Path | None:
@@ -1025,6 +1240,8 @@ def sign_challenge_with_enclave(nonce_b64: str) -> dict:
 
 
 def sign_challenge_with_tpm(nonce_b64: str, ak_handle: str = "") -> dict:
+  # CROSS_IMPL_SYNC: tpm_sign
+  # Implementations: py:oneid/helper.py go:internal/tpm/sign.go node:src/helper.ts
   """Sign a challenge nonce using the TPM AK -- NO ELEVATION NEEDED.
 
   This is the core of ongoing TPM-backed authentication. The agent
@@ -1053,3 +1270,421 @@ def sign_challenge_with_tpm(nonce_b64: str, ak_handle: str = "") -> dict:
     sign_args.extend(["--ak-handle", ak_handle])
   output = _run_binary_command("sign", args=sign_args)
   return output
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Multi-YubiKey enumeration and selection via PC/SC (pyscard)
+# ---------------------------------------------------------------------------
+# The Go binary always opens the first YubiKey it finds, so when multiple
+# YubiKeys are connected the SDK uses pyscard directly to enumerate readers,
+# get serial numbers, and sign with a specific device.
+# ---------------------------------------------------------------------------
+
+_PIV_AID_FOR_APPLET_SELECT = [0xA0, 0x00, 0x00, 0x03, 0x08]
+_YUBIKEY_MANAGEMENT_AID_FOR_SERIAL_AND_FIRMWARE = [
+  0xA0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17
+]
+
+
+def _pcsc_parse_yubikey_management_device_info_tlv_for_serial_and_firmware(
+  raw_device_info_bytes: list[int],
+) -> dict:
+  """Parse the TLV response from YubiKey management GET DEVICE INFO.
+
+  Returns dict with optional 'serial' (int) and 'firmware' (str) keys.
+  The first byte of the response is the total length; TLV pairs follow.
+  Tag 0x02 (4 bytes, big-endian) = serial number.
+  Tag 0x05 (3 bytes) = firmware major.minor.patch.
+  """
+  import struct
+  result: dict = {}
+  if not raw_device_info_bytes or len(raw_device_info_bytes) < 3:
+    return result
+  pos = 1  # skip length byte
+  while pos < len(raw_device_info_bytes) - 1:
+    tag = raw_device_info_bytes[pos]
+    length = raw_device_info_bytes[pos + 1]
+    pos += 2
+    value = raw_device_info_bytes[pos:pos + length]
+    pos += length
+    if tag == 0x02 and length == 4:
+      result["serial"] = struct.unpack(">I", bytes(value))[0]
+    elif tag == 0x05 and length >= 3:
+      result["firmware"] = "%d.%d.%d" % (value[0], value[1], value[2])
+  return result
+
+
+def enumerate_all_piv_capable_yubikeys_via_pcsc() -> list[dict]:
+  # CROSS_IMPL_SYNC: piv_multi_key
+  # Implementations: py:oneid/helper.py go:internal/piv/connection.go(MISSING) node:src/helper.ts(MISSING)
+  """Enumerate all connected YubiKeys that have a PIV applet, via PC/SC.
+
+  Each YubiKey is probed for its serial number (via the management applet)
+  and whether slot 9a contains a key (via PIV GENERAL AUTHENTICATE probe).
+
+  Returns a list of dicts in PC/SC enumeration order (the LAST entry is
+  typically the most recently plugged device), each containing:
+    - reader_name: str  (PC/SC reader name, needed to reconnect for signing)
+    - serial_number: int | None
+    - firmware_version: str | None
+    - piv_slot_9a_has_signing_key: bool
+    - pcsc_enumeration_index: int  (position in the reader list)
+  """
+  try:
+    from smartcard.System import readers as pcsc_list_readers
+  except ImportError:
+    logger.warning(
+      "pyscard not installed; cannot enumerate multiple YubiKeys. "
+      "Install with: pip install pyscard"
+    )
+    return []
+
+  try:
+    all_pcsc_readers = pcsc_list_readers()
+  except Exception as pcsc_error:
+    logger.warning("PC/SC reader enumeration failed: %s", pcsc_error)
+    return []
+
+  import hashlib
+  detected_yubikeys: list[dict] = []
+
+  for reader_index, reader_object in enumerate(all_pcsc_readers):
+    reader_name = str(reader_object)
+    if "yubi" not in reader_name.lower():
+      continue
+
+    entry: dict = {
+      "reader_name": reader_name,
+      "serial_number": None,
+      "firmware_version": None,
+      "piv_slot_9a_has_signing_key": False,
+      "pcsc_enumeration_index": reader_index,
+    }
+
+    try:
+      connection = reader_object.createConnection()
+      connection.connect()
+
+      # Get serial + firmware via management applet
+      select_mgmt_apdu = (
+        [0x00, 0xA4, 0x04, 0x00, len(_YUBIKEY_MANAGEMENT_AID_FOR_SERIAL_AND_FIRMWARE)]
+        + _YUBIKEY_MANAGEMENT_AID_FOR_SERIAL_AND_FIRMWARE
+      )
+      data, sw1, sw2 = connection.transmit(select_mgmt_apdu)
+      if sw1 == 0x90:
+        get_device_info_apdu = [0x00, 0x1D, 0x00, 0x00]
+        data, sw1, sw2 = connection.transmit(get_device_info_apdu)
+        if sw1 == 0x90 and data:
+          parsed = _pcsc_parse_yubikey_management_device_info_tlv_for_serial_and_firmware(data)
+          entry["serial_number"] = parsed.get("serial")
+          entry["firmware_version"] = parsed.get("firmware")
+
+      # Check if slot 9a has a signing key by probing GENERAL AUTHENTICATE
+      select_piv_apdu = (
+        [0x00, 0xA4, 0x04, 0x00, len(_PIV_AID_FOR_APPLET_SELECT)]
+        + _PIV_AID_FOR_APPLET_SELECT
+      )
+      data, sw1, sw2 = connection.transmit(select_piv_apdu)
+      if sw1 == 0x90:
+        probe_hash = list(hashlib.sha256(b"phase4-slot-probe").digest())
+        # GENERAL AUTHENTICATE: P1=0x11 (ECC P-256), P2=0x9A (slot 9a)
+        probe_apdu = (
+          [0x00, 0x87, 0x11, 0x9A, 0x26, 0x7C, 0x24, 0x82, 0x00, 0x81, 0x20]
+          + probe_hash
+        )
+        data, sw1, sw2 = connection.transmit(probe_apdu)
+        if sw1 == 0x90:
+          entry["piv_slot_9a_has_signing_key"] = True
+        else:
+          # Try RSA 2048 (P1=0x07) in case slot 9a has an RSA key
+          probe_apdu_rsa = (
+            [0x00, 0x87, 0x07, 0x9A, 0x26, 0x7C, 0x24, 0x82, 0x00, 0x81, 0x20]
+            + probe_hash
+          )
+          data, sw1, sw2 = connection.transmit(probe_apdu_rsa)
+          if sw1 == 0x90:
+            entry["piv_slot_9a_has_signing_key"] = True
+
+      connection.disconnect()
+    except Exception as reader_error:
+      logger.debug("Could not probe YubiKey at %s: %s", reader_name, reader_error)
+
+    detected_yubikeys.append(entry)
+
+  logger.info(
+    "Enumerated %d PIV-capable YubiKey(s) via PC/SC",
+    len(detected_yubikeys),
+  )
+  return detected_yubikeys
+
+
+def select_preferred_piv_yubikey_reader_name(
+  available_yubikeys: list[dict] | None = None,
+  preferred_serial_number: int | None = None,
+  registered_piv_device_serial_number: int | None = None,
+) -> str | None:
+  """Choose which YubiKey reader to use for PIV signing.
+
+  Priority order (production-ready common-sense logic):
+    1. Explicit serial override -- caller knows which key they want
+    2. Registered device match -- the serial from credentials/database
+    3. Most-recently-plugged heuristic -- LAST in PC/SC enumeration
+       among keys that have a functioning slot 9a key
+    4. If no key has slot 9a populated, pick the last enumerated anyway
+       (enrollment will generate a key there)
+    5. Single YubiKey -- no ambiguity, use it
+
+  Args:
+    available_yubikeys: Output of enumerate_all_piv_capable_yubikeys_via_pcsc().
+        If None, will call that function automatically.
+    preferred_serial_number: Explicit serial override from caller.
+    registered_piv_device_serial_number: Serial of the PIV device registered
+        in credentials for this identity (if known).
+
+  Returns:
+    PC/SC reader name string, or None if no YubiKey is available.
+  """
+  if available_yubikeys is None:
+    available_yubikeys = enumerate_all_piv_capable_yubikeys_via_pcsc()
+
+  if not available_yubikeys:
+    return None
+
+  # Single key: no ambiguity
+  if len(available_yubikeys) == 1:
+    return available_yubikeys[0]["reader_name"]
+
+  # Priority 1: Explicit serial override
+  if preferred_serial_number is not None:
+    for yk in available_yubikeys:
+      if yk["serial_number"] == preferred_serial_number:
+        logger.info(
+          "Selected YubiKey serial %d (explicit override) at reader %s",
+          preferred_serial_number, yk["reader_name"],
+        )
+        return yk["reader_name"]
+    logger.warning(
+      "Requested YubiKey serial %d not found among %d connected keys",
+      preferred_serial_number, len(available_yubikeys),
+    )
+    return None
+
+  # Priority 2: Registered device match
+  if registered_piv_device_serial_number is not None:
+    for yk in available_yubikeys:
+      if yk["serial_number"] == registered_piv_device_serial_number:
+        logger.info(
+          "Selected registered PIV YubiKey serial %d at reader %s",
+          registered_piv_device_serial_number, yk["reader_name"],
+        )
+        return yk["reader_name"]
+    logger.info(
+      "Registered PIV serial %d not among connected keys; falling through to heuristic",
+      registered_piv_device_serial_number,
+    )
+
+  # Priority 3: Last-enumerated key WITH a slot 9a key (most-recently-plugged)
+  yubikeys_with_signing_key = [
+    yk for yk in available_yubikeys if yk["piv_slot_9a_has_signing_key"]
+  ]
+  if yubikeys_with_signing_key:
+    chosen = yubikeys_with_signing_key[-1]
+    logger.info(
+      "Selected most-recently-plugged YubiKey with slot 9a key: "
+      "serial %s at reader %s (last of %d with keys)",
+      chosen["serial_number"], chosen["reader_name"],
+      len(yubikeys_with_signing_key),
+    )
+    return chosen["reader_name"]
+
+  # Priority 4: Last-enumerated key (for enrollment or fresh setup)
+  chosen = available_yubikeys[-1]
+  logger.info(
+    "No YubiKey has slot 9a key; selected last-enumerated: "
+    "serial %s at reader %s",
+    chosen["serial_number"], chosen["reader_name"],
+  )
+  return chosen["reader_name"]
+
+
+def sign_nonce_with_specific_piv_reader_via_pcsc(
+  nonce_bytes: bytes,
+  reader_name: str,
+) -> dict:
+  """Sign a nonce using PIV slot 9a on a specific PC/SC reader.
+
+  Pure Python implementation via pyscard APDUs -- does NOT use the Go binary.
+  This enables signing with a specific YubiKey when multiple are connected.
+
+  The nonce is SHA-256 hashed before sending to the card (matching the
+  Go binary's behavior for ECDSA-SHA256).
+
+  Args:
+    nonce_bytes: Raw nonce bytes to sign (any length; will be SHA-256 hashed).
+    reader_name: Exact PC/SC reader name string from enumeration.
+
+  Returns:
+    Dict matching the Go binary's output format:
+      - signature_b64: Base64-encoded DER ECDSA signature
+      - algorithm: "ECDSA-SHA256"
+      - serial_number: YubiKey serial (str) if available
+
+  Raises:
+    NoHSMError: If the reader is not found or card not present.
+    HSMAccessError: If PIV selection or signing fails.
+  """
+  import base64
+  import hashlib
+
+  try:
+    from smartcard.System import readers as pcsc_list_readers
+  except ImportError:
+    raise HSMAccessError(
+      "pyscard not installed; required for multi-YubiKey PIV signing. "
+      "Install with: pip install pyscard"
+    )
+
+  try:
+    all_readers = pcsc_list_readers()
+  except Exception as pcsc_err:
+    raise NoHSMError("PC/SC subsystem unavailable: %s" % pcsc_err)
+
+  target_reader = None
+  for r in all_readers:
+    if str(r) == reader_name:
+      target_reader = r
+      break
+  if target_reader is None:
+    raise NoHSMError("PC/SC reader not found: %s" % reader_name)
+
+  try:
+    connection = target_reader.createConnection()
+    connection.connect()
+  except Exception as connect_err:
+    raise NoHSMError("Cannot connect to YubiKey at %s: %s" % (reader_name, connect_err))
+
+  try:
+    # SELECT PIV applet
+    select_piv = (
+      [0x00, 0xA4, 0x04, 0x00, len(_PIV_AID_FOR_APPLET_SELECT)]
+      + _PIV_AID_FOR_APPLET_SELECT
+    )
+    data, sw1, sw2 = connection.transmit(select_piv)
+    if sw1 != 0x90:
+      raise HSMAccessError("PIV applet selection failed: SW=%02X%02X" % (sw1, sw2))
+
+    # Hash the nonce (matching Go binary: ECDSA-SHA256)
+    digest_32_bytes = list(hashlib.sha256(nonce_bytes).digest())
+
+    # GENERAL AUTHENTICATE: P1=0x11 (ECC P-256), P2=0x9A (slot 9a)
+    # Data: 7C 24 82 00 81 20 [32 bytes]
+    sign_apdu = (
+      [0x00, 0x87, 0x11, 0x9A, 0x26,
+       0x7C, 0x24, 0x82, 0x00, 0x81, 0x20]
+      + digest_32_bytes
+    )
+    data, sw1, sw2 = connection.transmit(sign_apdu)
+
+    if sw1 == 0x69 and sw2 == 0x82:
+      raise HSMAccessError(
+        "PIV slot 9a requires PIN verification (pin-policy is not NEVER). "
+        "This YubiKey may not be configured for agent use."
+      )
+    if sw1 == 0x6A and sw2 == 0x80:
+      raise HSMAccessError(
+        "No key in PIV slot 9a on this YubiKey. "
+        "The key may not be enrolled or may need setup."
+      )
+    if sw1 != 0x90:
+      raise HSMAccessError("PIV signing failed: SW=%02X%02X" % (sw1, sw2))
+
+    # Parse response TLV: 7C [len] 82 [len] [signature bytes]
+    raw_response = bytes(data)
+    signature_der_bytes = _pcsc_extract_signature_from_general_authenticate_response(raw_response)
+
+    # Get serial number for the response
+    serial_str = ""
+    try:
+      select_mgmt = (
+        [0x00, 0xA4, 0x04, 0x00, len(_YUBIKEY_MANAGEMENT_AID_FOR_SERIAL_AND_FIRMWARE)]
+        + _YUBIKEY_MANAGEMENT_AID_FOR_SERIAL_AND_FIRMWARE
+      )
+      data2, sw1_2, sw2_2 = connection.transmit(select_mgmt)
+      if sw1_2 == 0x90:
+        data2, sw1_2, sw2_2 = connection.transmit([0x00, 0x1D, 0x00, 0x00])
+        if sw1_2 == 0x90 and data2:
+          parsed = _pcsc_parse_yubikey_management_device_info_tlv_for_serial_and_firmware(data2)
+          if parsed.get("serial"):
+            serial_str = str(parsed["serial"])
+    except Exception:
+      pass
+
+    connection.disconnect()
+
+    return {
+      "signature_b64": base64.b64encode(signature_der_bytes).decode("ascii"),
+      "algorithm": "ECDSA-SHA256",
+      "serial_number": serial_str,
+    }
+
+  except (NoHSMError, HSMAccessError):
+    connection.disconnect()
+    raise
+  except Exception as unexpected_err:
+    connection.disconnect()
+    raise HSMAccessError("Unexpected PIV signing error: %s" % unexpected_err)
+
+
+def _pcsc_extract_signature_from_general_authenticate_response(
+  raw_response_bytes: bytes,
+) -> bytes:
+  """Extract the signature from a PIV GENERAL AUTHENTICATE response.
+
+  The response is TLV-encoded: tag 0x7C containing tag 0x82 with the
+  DER-encoded ECDSA (or RSA) signature bytes.
+  """
+  if len(raw_response_bytes) < 4:
+    raise HSMAccessError(
+      "PIV GENERAL AUTHENTICATE response too short: %d bytes" % len(raw_response_bytes)
+    )
+  # Expect: 7C [length] 82 [length] [signature]
+  if raw_response_bytes[0] != 0x7C:
+    raise HSMAccessError(
+      "Unexpected PIV response tag: 0x%02X (expected 0x7C)" % raw_response_bytes[0]
+    )
+
+  # Parse outer TLV (tag 7C)
+  pos = 1
+  outer_len, pos = _pcsc_parse_asn1_length(raw_response_bytes, pos)
+
+  # Parse inner tag 82
+  if pos >= len(raw_response_bytes) or raw_response_bytes[pos] != 0x82:
+    raise HSMAccessError(
+      "Unexpected inner PIV response tag: 0x%02X (expected 0x82)"
+      % (raw_response_bytes[pos] if pos < len(raw_response_bytes) else 0)
+    )
+  pos += 1
+  sig_len, pos = _pcsc_parse_asn1_length(raw_response_bytes, pos)
+
+  signature_bytes = raw_response_bytes[pos:pos + sig_len]
+  if len(signature_bytes) != sig_len:
+    raise HSMAccessError(
+      "Truncated PIV signature: expected %d bytes, got %d" % (sig_len, len(signature_bytes))
+    )
+  return signature_bytes
+
+
+def _pcsc_parse_asn1_length(data: bytes, offset: int) -> tuple[int, int]:
+  """Parse an ASN.1/BER length field. Returns (length_value, new_offset)."""
+  if offset >= len(data):
+    raise HSMAccessError("ASN.1 length parse: offset %d beyond data" % offset)
+  first_byte = data[offset]
+  if first_byte < 0x80:
+    return first_byte, offset + 1
+  num_length_bytes = first_byte & 0x7F
+  if num_length_bytes == 0 or offset + 1 + num_length_bytes > len(data):
+    raise HSMAccessError("ASN.1 length parse: invalid multi-byte length")
+  length_value = 0
+  for i in range(num_length_bytes):
+    length_value = (length_value << 8) | data[offset + 1 + i]
+  return length_value, offset + 1 + num_length_bytes

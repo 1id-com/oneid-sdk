@@ -124,11 +124,18 @@ def _sign_with_tpm(nonce_bytes: bytes, ak_handle: str) -> tuple[bytes, str]:
   return base64.b64decode(signature_b64), algo_name
 
 
-def _sign_with_piv(nonce_bytes: bytes) -> tuple[bytes, str]:
-  """Sign using the YubiKey PIV key via the Go binary. Returns (signature_bytes, algorithm)."""
+def _sign_with_piv(
+  nonce_bytes: bytes,
+  piv_serial_number: int | None = None,
+) -> tuple[bytes, str]:
+  """Sign using the YubiKey PIV key. Returns (signature_bytes, algorithm).
+
+  Phase 4: When piv_serial_number is provided or multiple YubiKeys are
+  connected, uses pure-Python PC/SC signing to target the specific device.
+  """
   from .helper import sign_challenge_with_piv
   nonce_b64 = base64.b64encode(nonce_bytes).decode("ascii")
-  result = sign_challenge_with_piv(nonce_b64)
+  result = sign_challenge_with_piv(nonce_b64, piv_serial_number=piv_serial_number)
   signature_b64 = result.get("signature_b64", "")
   algorithm = result.get("algorithm", "ECDSA-SHA256")
   algo_name = "ES256" if "ECDSA" in algorithm.upper() else algorithm

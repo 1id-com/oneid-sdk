@@ -37,7 +37,9 @@ class KeyAlgorithm(str, Enum):
   """Supported key algorithms for declared-tier software keys.
 
   Agents can choose their preferred algorithm, similar to how SSH
-  supports multiple key types. Default is Ed25519 (strongest, fastest).
+  supports multiple key types. Default is ECDSA P-256 (the only software key
+
+  type that can also sign Version 1 Mode 1 email proofs as ES256).
 
   For TPM tiers, the key algorithm is determined by the TPM hardware
   (typically RSA-2048 for EK, RSA-2048 or ECC P-256 for AK).
@@ -50,9 +52,9 @@ class KeyAlgorithm(str, Enum):
 
 
 # -- The default key algorithm for declared-tier enrollment --
-# Ed25519: 128-bit security, smallest keys, fastest signatures,
-# widely supported (OpenSSH, TLS 1.3, libsodium, NaCl).
-DEFAULT_KEY_ALGORITHM = KeyAlgorithm.ED25519
+# ECDSA P-256 (ES256): the email draft's Version 1 Mode 1 CMS table allows only
+# RS256 / ES256 / PS256, so Ed25519 and P-384 keys cannot sign Mode 1 email (AUD-F22/F60).
+DEFAULT_KEY_ALGORITHM = KeyAlgorithm.ECDSA_P256
 
 
 class HSMType(str, Enum):
@@ -103,6 +105,8 @@ class Identity:
   key_algorithm: KeyAlgorithm
   agent_identity_urn: str | None = None
   display_name: str | None = None
+  message_for_agent: str | None = None
+  handle_summary: dict | None = None
 
   def __str__(self) -> str:
     name_part = f" ({self.display_name})" if self.display_name else ""

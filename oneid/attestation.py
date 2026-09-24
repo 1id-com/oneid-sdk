@@ -30,8 +30,8 @@ RFC: draft-drake-email-hardware-attestation-03
 from __future__ import annotations
 
 import base64
-import email.header
 import hashlib
+import re
 import logging
 import struct
 import time
@@ -51,8 +51,11 @@ logger = logging.getLogger("oneid.attestation")
 
 _HTTP_TIMEOUT_SECONDS = 15.0
 
+# Email draft (2026-09-24): both modes ALWAYS cover these nine fields; a
+# listed field that is absent is fine (DKIM rule: protects against addition).
 _MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING = [
   "from", "to", "subject", "date", "message-id",
+  "reply-to", "mime-version", "content-type", "content-transfer-encoding",
 ]
 
 _TRUST_TIER_TO_RFC_TYP_PARAMETER = {
@@ -92,18 +95,11 @@ def canonicalise_headers_for_direct_attestation(
   """
   lowered_headers = {k.strip().lower(): v for k, v in email_headers.items()}
 
-  for required_header_name in _MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING:
-    if required_header_name not in lowered_headers:
-      raise ValueError(
-        f"Missing required email header '{required_header_name}' for Mode 1 attestation. "
-        f"Required headers: {_MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING}"
-      )
-
   all_header_names = list(_MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING)
   extra_names = sorted(
     h for h in lowered_headers
     if h not in _MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING
-    and h not in ("hardware-attestation", "hardware-trust-proof")
+    and h != "hardware-attestation"
   )
   all_header_names.extend(extra_names)
   all_header_names = all_header_names + list(all_header_names)
@@ -115,12 +111,17 @@ def canonicalise_headers_for_direct_attestation(
   for entry in selected:
     if entry is None:
       continue
-    canon_name = canonicalise_header_name_using_dkim_relaxed(entry[0])
-    canon_value = canonicalise_header_value_using_dkim_relaxed(entry[1])
-    canonicalised_header_lines.append(f"{canon_name}:{canon_value}\r\n")
+    canonicalised_header_lines.append(
+      canonicalise_selected_header_field_using_dkim2_header_hash_rules(
+        entry[0], entry[1]
+      )
+    )
 
-  self_referencing_attestation_line = f"hardware-attestation: {hardware_attestation_header_value_without_chain}"
-  canonicalised_header_lines.append(self_referencing_attestation_line)
+  canonicalised_header_lines.append(
+    canonicalise_hardware_attestation_self_reference_using_dkim2_signature_rules(
+      hardware_attestation_header_value_without_chain
+    )
+  )
 
   return "".join(canonicalised_header_lines).encode("utf-8")
 
@@ -225,6 +226,20 @@ _RFC_ALG_TO_SIGNATURE_OID = {
   "EdDSA": _OID_ED25519,
 }
 
+# Email draft "CMS Algorithm Mapping" (AUD-F23): the exact DER AlgorithmIdentifier
+# generated for each Version 1 alg. SHA-256 parameters are absent (RFC 5754); RS256
+# carries NULL; ES256 has none; PS256 encodes SHA-256, MGF1-SHA-256 and salt 32
+# (trailerField 1 is the DER default, so omitted). Byte-identical to OpenSSL 3.2.
+_DER_SHA256_DIGEST_ALGORITHM_IDENTIFIER_WITH_ABSENT_PARAMETERS = bytes.fromhex("300b0609608648016503040201")
+_RFC_ALG_TO_DER_SIGNATURE_ALGORITHM_IDENTIFIER = {
+  "RS256": bytes.fromhex("300d06092a864886f70d01010b0500"),
+  "ES256": bytes.fromhex("300a06082a8648ce3d040302"),
+  "PS256": bytes.fromhex(
+    "304106092a864886f70d01010a3034a00f300d06096086480165030402010500"
+    "a11c301a06092a864886f70d010108300d06096086480165030402010500a203020120"
+  ),
+}
+
 
 def build_cms_signed_data_for_direct_attestation(
   signature_bytes: bytes,
@@ -270,18 +285,15 @@ def build_cms_signed_data_for_direct_attestation(
   if signature_oid_string is None:
     raise ValueError(f"Unsupported signature algorithm: {signature_algorithm_rfc_name}")
 
-  # RFC 8419: EdDSA uses its own OID as the digestAlgorithm (PureEdDSA
-  # has no separate hash step). All other algorithms use SHA-256.
+  # RFC 8419 s3.1: with Ed25519 the digestAlgorithm MUST be id-sha512, parameters
+  # absent (OWN-022; EdDSA is outside Version 1). All other algorithms use SHA-256.
   if signature_algorithm_rfc_name == "EdDSA":
     digest_algorithm_identifier = _der_encode_tag_length_value(
       0x30,
-      _der_encode_oid(_OID_ED25519),
+      _der_encode_oid("2.16.840.1.101.3.4.2.3"),  # id-sha512
     )
   else:
-    digest_algorithm_identifier = _der_encode_tag_length_value(
-      0x30,
-      _der_encode_oid(_OID_SHA256) + _der_encode_tag_length_value(0x05, b""),
-    )
+    digest_algorithm_identifier = _DER_SHA256_DIGEST_ALGORITHM_IDENTIFIER_WITH_ABSENT_PARAMETERS
 
   digest_algorithms_set = _der_encode_tag_length_value(0x31, digest_algorithm_identifier)
 
@@ -306,10 +318,7 @@ def build_cms_signed_data_for_direct_attestation(
       _der_encode_oid(signature_oid_string),
     )
   else:
-    signature_algorithm_identifier = _der_encode_tag_length_value(
-      0x30,
-      _der_encode_oid(signature_oid_string) + _der_encode_tag_length_value(0x05, b""),
-    )
+    signature_algorithm_identifier = _RFC_ALG_TO_DER_SIGNATURE_ALGORITHM_IDENTIFIER[signature_algorithm_rfc_name]
 
   signature_octet_string = _der_encode_tag_length_value(0x04, signature_bytes)
 
@@ -340,6 +349,56 @@ def build_cms_signed_data_for_direct_attestation(
   )
 
   return content_info
+
+
+def _certificate_chain_leaf_key_verifies_mode1_signature(
+  certificate_chain_pem: Optional[str],
+  attestation_input_72_bytes: bytes,
+  signature_bytes: bytes,
+  rfc_alg: str,
+) -> bool:
+  """True when the chain's first (leaf) certificate holds the key that produced
+  signature_bytes over the 72-octet attestation-input under rfc_alg."""
+  from cryptography.exceptions import InvalidSignature
+  from cryptography.hazmat.primitives import hashes
+  from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
+  end_marker = "-----END CERTIFICATE-----"
+  leaf_start = certificate_chain_pem.find("-----BEGIN CERTIFICATE-----") if certificate_chain_pem else -1
+  leaf_end = certificate_chain_pem.find(end_marker) if certificate_chain_pem else -1
+  if leaf_start < 0 or leaf_end < 0:
+    return False
+  try:
+    leaf_public_key = x509.load_pem_x509_certificate(
+      certificate_chain_pem[leaf_start:leaf_end + len(end_marker)].encode("ascii")).public_key()
+    if rfc_alg == "ES256" and isinstance(leaf_public_key, ec.EllipticCurvePublicKey):
+      leaf_public_key.verify(signature_bytes, attestation_input_72_bytes, ec.ECDSA(hashes.SHA256()))
+    elif rfc_alg == "RS256" and isinstance(leaf_public_key, rsa.RSAPublicKey):
+      leaf_public_key.verify(signature_bytes, attestation_input_72_bytes, padding.PKCS1v15(), hashes.SHA256())
+    elif rfc_alg == "PS256" and isinstance(leaf_public_key, rsa.RSAPublicKey):
+      leaf_public_key.verify(signature_bytes, attestation_input_72_bytes,
+                             padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32), hashes.SHA256())
+    elif rfc_alg == "EdDSA" and isinstance(leaf_public_key, ed25519.Ed25519PublicKey):
+      leaf_public_key.verify(signature_bytes, attestation_input_72_bytes)
+    else:
+      return False
+    return True
+  except (InvalidSignature, ValueError, TypeError):
+    return False
+
+
+def _registrar_binding_jws_confirms_certificate_leaf_key(binding_jws: str, certificate_chain_pem: str) -> bool:
+  """True when the binding JWS cnf.jwk is the public key of the chain's leaf."""
+  import json
+  from .mailpal import _extract_public_key_jwk_from_certificate_chain_pem
+  try:
+    payload_segment = binding_jws.split(".")[1]
+    payload = json.loads(base64.urlsafe_b64decode(payload_segment + "=" * (-len(payload_segment) % 4)))
+    confirmed_jwk = (payload.get("cnf") or {}).get("jwk") or {}
+  except (IndexError, ValueError, AttributeError):
+    return False
+  leaf_jwk = _extract_public_key_jwk_from_certificate_chain_pem(certificate_chain_pem) or {}
+  compared_fields = ("kty", "crv", "x", "y") if leaf_jwk.get("kty") == "EC" else ("kty", "n", "e")
+  return bool(leaf_jwk) and all(confirmed_jwk.get(field_name) == leaf_jwk.get(field_name) for field_name in compared_fields)
 
 
 def _sign_attestation_input_with_software_key(
@@ -384,10 +443,14 @@ def _sign_attestation_input_with_software_key(
 
 
 def prepare_direct_hardware_attestation(
+  # CROSS_IMPL_SYNC: mode1_attestation
+  # Implementations: py:oneid/attestation.py node:src/attestation.ts
   email_headers: Dict[str, str],
   body: bytes,
   agent_identity_urn: Optional[str] = None,
   binding_jws: Optional[str] = None,
+  override_signing_device_type: Optional[str] = None,
+  piv_serial_number: Optional[int] = None,
 ) -> AttestationProof:
   """Prepare a Mode 1 (Direct Hardware Attestation) proof.
 
@@ -406,6 +469,15 @@ def prepare_direct_hardware_attestation(
     email_headers: Dict of email header name -> value.
     body: Raw email body bytes.
     agent_identity_urn: Optional URN override (default: from credentials).
+    override_signing_device_type: Phase 3 runtime device selection. When set
+        to "piv" or "tpm", forces signing with that device regardless of the
+        identity's trust tier. Use "piv" when a registered YubiKey is plugged
+        in and you want to sign with it instead of the TPM. The per-device
+        certificate chain (Phase 2) is automatically selected to match.
+    piv_serial_number: Phase 4 multi-YubiKey selection. When set, forces
+        signing with the YubiKey that has this serial number. When None and
+        multiple YubiKeys are connected, the SDK picks the most-recently-plugged
+        key that has a slot 9a signing key, or falls back to the registered key.
 
   Returns:
     AttestationProof with hardware_attestation_header_value populated.
@@ -452,13 +524,40 @@ def prepare_direct_hardware_attestation(
   all_signed_names.extend(extra_header_names)
   signed_header_names = ":".join(all_signed_names) + ":" + ":".join(all_signed_names)
 
-  if trust_tier == "portable" or trust_tier == "enclave":
+  # Phase 3: Runtime device selection -- override_signing_device_type lets the
+  # caller force signing with a specific device (e.g. "piv" when a YubiKey is
+  # plugged in, even though the identity is sovereign-tier / TPM-enrolled).
+  # The algorithm, typ parameter, and cert chain all adapt accordingly.
+  effective_signing_device_type = override_signing_device_type
+  if not effective_signing_device_type:
+    # Default: derive from trust tier / credentials (pre-Phase-3 behavior)
+    if trust_tier == "portable":
+      effective_signing_device_type = "piv"
+    elif trust_tier == "enclave":
+      effective_signing_device_type = "enclave"
+    elif trust_tier in ("sovereign", "virtual") or creds.key_algorithm == "tpm-ak":
+      effective_signing_device_type = "tpm"
+    elif creds.private_key_pem:
+      effective_signing_device_type = "software"
+
+  if effective_signing_device_type == "piv":
     algorithm_for_header = "ES256"
-  elif trust_tier in ("sovereign", "virtual") or creds.key_algorithm == "tpm-ak":
+    typ_parameter = _TRUST_TIER_TO_RFC_TYP_PARAMETER.get("portable", "PIV")
+  elif effective_signing_device_type == "enclave":
+    algorithm_for_header = "ES256"
+  elif effective_signing_device_type == "tpm":
     algorithm_for_header = "RS256"
-  elif creds.private_key_pem:
+  elif effective_signing_device_type == "software" and creds.private_key_pem:
     algo_name = _determine_signing_algorithm_name(creds)
     algorithm_for_header = algo_name
+    if algorithm_for_header not in _RFC_ALG_TO_DER_SIGNATURE_ALGORITHM_IDENTIFIER:
+      # AUD-F22/F60: Version 1 Mode 1 allows only RS256 / ES256 / PS256.
+      raise ValueError(
+        f"This identity's {creds.key_algorithm} key cannot sign a Version 1 Mode 1 "
+        f"email proof ({algorithm_for_header} is not in the email draft's CMS table). "
+        "Enroll a declared identity with key_algorithm='ecdsa-p256' (the default) "
+        "or use a hardware tier."
+      )
   else:
     raise NotEnrolledError("No signing key available for Mode 1 attestation.")
 
@@ -479,14 +578,15 @@ def prepare_direct_hardware_attestation(
     hardware_attestation_header_value_without_chain=header_template_without_chain,
   )
 
-  if trust_tier == "portable":
-    signature_bytes, resolved_algorithm = _sign_with_piv(attestation_input_72_bytes)
-  elif trust_tier == "enclave":
+  if effective_signing_device_type == "piv":
+    signature_bytes, resolved_algorithm = _sign_with_piv(
+      attestation_input_72_bytes, piv_serial_number=piv_serial_number)
+  elif effective_signing_device_type == "enclave":
     signature_bytes, resolved_algorithm = _sign_with_enclave(attestation_input_72_bytes)
-  elif trust_tier in ("sovereign", "virtual") or creds.key_algorithm == "tpm-ak":
+  elif effective_signing_device_type == "tpm":
     ak_handle = creds.hsm_key_reference or ""
     signature_bytes, resolved_algorithm = _sign_with_tpm(attestation_input_72_bytes, ak_handle)
-  elif creds.private_key_pem:
+  elif effective_signing_device_type == "software" and creds.private_key_pem:
     signature_bytes = _sign_attestation_input_with_software_key(
       attestation_input_72_bytes, creds.private_key_pem)
     resolved_algorithm = algorithm_for_header
@@ -494,9 +594,54 @@ def prepare_direct_hardware_attestation(
     raise NotEnrolledError("No signing key available.")
 
   actual_algorithm_for_cms = resolved_algorithm if resolved_algorithm else algorithm_for_header
+
+  # Phase 2+3: Select the per-device certificate chain that matches the signing device.
+  # effective_signing_device_type (from Phase 3 runtime selection or default derivation)
+  # tells us which device just signed, so we pick its matching cert chain.
+  certificate_chain_pem_for_this_signing_device = creds.identity_certificate_chain_pem
+  if creds.device_certificate_chains and effective_signing_device_type:
+    for _device_fp, _chain_pem in creds.device_certificate_chains.items():
+      if isinstance(_chain_pem, dict):
+        if _chain_pem.get("device_type") == effective_signing_device_type:
+          certificate_chain_pem_for_this_signing_device = _chain_pem.get(
+            "certificate_chain_pem", certificate_chain_pem_for_this_signing_device)
+          break
+      elif isinstance(_chain_pem, str):
+        certificate_chain_pem_for_this_signing_device = _chain_pem
+        break
+
+  # AUD-F81 (+F57): the CMS signer certificate must carry the key that produced
+  # this signature. The device-type guess above is tried first, then every
+  # stored chain; if none matches, fail closed instead of packaging another
+  # device's certificate -- and any bind must confirm that same key.
+  candidate_certificate_chains = [certificate_chain_pem_for_this_signing_device]
+  for _chain_data in (creds.device_certificate_chains or {}).values():
+    _candidate_chain = _chain_data.get("certificate_chain_pem") if isinstance(_chain_data, dict) else _chain_data
+    if _candidate_chain and _candidate_chain not in candidate_certificate_chains:
+      candidate_certificate_chains.append(_candidate_chain)
+  if creds.identity_certificate_chain_pem not in candidate_certificate_chains:
+    candidate_certificate_chains.append(creds.identity_certificate_chain_pem)
+  certificate_chain_pem_for_this_signing_device = next(
+    (candidate_chain for candidate_chain in candidate_certificate_chains
+     if _certificate_chain_leaf_key_verifies_mode1_signature(
+       candidate_chain, attestation_input_72_bytes, signature_bytes, actual_algorithm_for_cms)),
+    None,
+  )
+  if certificate_chain_pem_for_this_signing_device is None:
+    raise ValueError(
+      "No stored certificate chain matches the key that signed this Mode 1 proof; "
+      "re-sync device certificates (oneid.sync_device_certificate_chains_from_server) or re-enroll."
+    )
+  if binding_jws and not _registrar_binding_jws_confirms_certificate_leaf_key(
+      binding_jws, certificate_chain_pem_for_this_signing_device):
+    raise ValueError(
+      "The Registrar binding was issued for a different key than the device that signed "
+      "this Mode 1 proof; send again (the binding is fetched for the signing device's key)."
+    )
+
   cms_der_bytes = build_cms_signed_data_for_direct_attestation(
     signature_bytes=signature_bytes,
-    certificate_chain_pem=creds.identity_certificate_chain_pem,
+    certificate_chain_pem=certificate_chain_pem_for_this_signing_device,
     signature_algorithm_rfc_name=actual_algorithm_for_cms,
   )
   chain_base64 = base64.b64encode(cms_der_bytes).decode("ascii")
@@ -519,45 +664,47 @@ def prepare_direct_hardware_attestation(
   )
 
 
-def decode_rfc2047_encoded_words_to_unicode(raw_header_value: str) -> str:
-  """Decode RFC 2047 encoded-words in a header value to plain Unicode.
-
-  MTAs may re-encode RFC 2047 differently (e.g. splitting across fold points,
-  or consolidating multiple encoded-words). Decoding before canonicalization
-  ensures the attestation hash is independent of encoding representation.
-
-  Pure-ASCII headers pass through unchanged. Only headers containing
-  =?charset?encoding?text?= sequences are affected.
-  """
-  try:
-    decoded_parts = email.header.decode_header(raw_header_value)
-    decoded_unicode = str(email.header.make_header(decoded_parts))
-    return decoded_unicode
-  except Exception:
-    return raw_header_value
-
-
 def canonicalise_header_value_using_dkim_relaxed(raw_value: str) -> str:
-  """RFC 6376 Section 3.4.2 relaxed header canonicalization (value part only).
+  """Apply DKIM2 -06 Section 6.2 value mechanics to one selected field.
 
-  Pre-step: Decode RFC 2047 encoded-words to Unicode.
-  Then standard DKIM relaxed:
-  1. Normalize all line endings to CRLF.
-  2. Unfold header continuation lines (CRLF followed by WSP).
-  3. Compress each sequence of WSP to a single SP.
-  4. Strip leading/trailing WSP.
+  The established public function name is retained for SDK compatibility.
+  Encoded words remain wire text; decoding them would change signed octets.
   """
   import re
-  decoded_value = decode_rfc2047_encoded_words_to_unicode(raw_value)
-  normalized = decoded_value.replace("\r\n", "\n").replace("\n", "\r\n")
-  unfolded = re.sub(r"\r\n[ \t]", " ", normalized)
+  unfolded = re.sub(r"\r?\n(?=[ \t])", "", raw_value)
   compressed = re.sub(r"[ \t]+", " ", unfolded)
-  return compressed.strip()
+  return compressed.strip(" \t")
 
 
 def canonicalise_header_name_using_dkim_relaxed(raw_name: str) -> str:
-  """RFC 6376 Section 3.4.2: header field names are lowercased."""
-  return raw_name.strip().lower()
+  """Apply DKIM2 -06 field-name lowercasing and colon-adjacent WSP removal."""
+  return raw_name.strip(" \t").lower()
+
+
+def canonicalise_selected_header_field_using_dkim2_header_hash_rules(
+  raw_header_field_name: str,
+  raw_header_field_value: str,
+) -> str:
+  """Return one CRLF-terminated selected field under DKIM2 Section 6.2."""
+  canonical_header_field_name = canonicalise_header_name_using_dkim_relaxed(
+    raw_header_field_name
+  )
+  canonical_header_field_value = canonicalise_header_value_using_dkim_relaxed(
+    raw_header_field_value
+  )
+  return f"{canonical_header_field_name}:{canonical_header_field_value}\r\n"
+
+
+def canonicalise_hardware_attestation_self_reference_using_dkim2_signature_rules(
+  hardware_attestation_header_value_with_empty_chain: str,
+) -> str:
+  """Use DKIM2 -06 Section 9.6 for the actual field with chain emptied."""
+  import re
+  unfolded_header_value = re.sub(
+    r"\r?\n(?=[ \t])", "", hardware_attestation_header_value_with_empty_chain
+  )
+  header_value_without_wsp = re.sub(r"[ \t]+", "", unfolded_header_value)
+  return f"hardware-attestation:{header_value_without_wsp}\r\n"
 
 
 def _select_headers_bottom_up_per_dkim(
@@ -597,8 +744,8 @@ def canonicalise_headers_for_message_binding(
   """Canonicalise email headers for the Mode 2 message-binding nonce, per
   draft-drake-email-hardware-attestation-03.
 
-  Mode 2 covers a FIXED set: exactly From, To, Subject, Date, Message-ID,
-  in THAT order, each once (no oversigning, no bottom-up selection, no
+  Mode 2 covers a FIXED set: the nine always-covered fields
+  (_MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING), in THAT order, each once (no oversigning, no bottom-up selection, no
   negotiation -- a Mode 2 header carries no explicit covered-header list,
   so any variation would make the verifier unable to reconstruct the
   nonce). Each is DKIM-relaxed-canonicalised and CRLF-terminated; then
@@ -607,19 +754,15 @@ def canonicalise_headers_for_message_binding(
   """
   lowered_headers = {k.strip().lower(): v for k, v in email_headers.items()}
 
-  for required_header_name in _MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING:
-    if required_header_name not in lowered_headers:
-      raise ValueError(
-        f"Missing required email header '{required_header_name}' for RFC message-binding nonce. "
-        f"Required headers: {_MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING}"
-      )
-
   canonicalised_header_lines = []
   for required_header_name in _MINIMUM_HEADERS_FOR_RFC_MESSAGE_BINDING:
-    canon_name = canonicalise_header_name_using_dkim_relaxed(required_header_name)
-    canon_value = canonicalise_header_value_using_dkim_relaxed(
-      lowered_headers[required_header_name])
-    canonicalised_header_lines.append(f"{canon_name}:{canon_value}\r\n")
+    if required_header_name not in lowered_headers:
+      continue  # absent field: contributes nothing (DKIM h= rule)
+    canonicalised_header_lines.append(
+      canonicalise_selected_header_field_using_dkim2_header_hash_rules(
+        required_header_name, lowered_headers[required_header_name]
+      )
+    )
 
   hardware_trust_proof_line = f"hardware-trust-proof:{hardware_trust_proof_header_value_placeholder}"
   canonicalised_header_lines.append(hardware_trust_proof_line)
@@ -676,6 +819,8 @@ def compute_rfc_message_binding_nonce(
 
 
 def prepare_attestation(
+  # CROSS_IMPL_SYNC: mode2_attestation
+  # Implementations: py:oneid/attestation.py node:src/attestation.ts
   content: Optional[bytes] = None,
   content_digest: Optional[str] = None,
   email_headers: Optional[Dict[str, str]] = None,
@@ -684,6 +829,8 @@ def prepare_attestation(
   include_contact_token: bool = True,
   include_sd_jwt: bool = True,
   api_base_url: Optional[str] = None,
+  override_session_device_type: Optional[str] = None,
+  cnf_jwk: Optional[Dict[str, Any]] = None,
 ) -> AttestationProof:
   """
   Prepare a protocol-agnostic attestation proof.
@@ -706,11 +853,16 @@ def prepare_attestation(
     content: Raw content bytes (simple mode). Will be hashed to SHA-256.
     content_digest: Pre-computed content digest "sha256:hex..." (simple mode).
     email_headers: Dict of email header name -> value (RFC mode).
-                   Must include at least From, To, Subject, Date, Message-ID.
+                   The nine always-covered fields (From, To, Subject, Date, Message-ID,
+                   Reply-To, MIME-Version, Content-Type, Content-Transfer-Encoding) are
+                   hashed when present; an absent one contributes nothing.
     body: Raw email body bytes (RFC mode). Used with email_headers.
     disclosed_claims: Which SD-JWT claims to disclose. Default: ["aid"].
     include_contact_token: Whether to fetch a contact token (default True).
     include_sd_jwt: Whether to fetch an SD-JWT proof (default True).
+    cnf_jwk: Combined mode only -- the Mode 1 proof public key (JWK); the
+             issuer places it in the signed payload as non-selective cnf.jwk.
+             Leave None for standalone Mode 2 (cnf MUST then be absent).
     api_base_url: Override the 1id.com API base URL.
 
   Returns:
@@ -736,6 +888,15 @@ def prepare_attestation(
 
   if content is not None and content_digest is not None:
     raise ValueError("Provide content OR content_digest, not both.")
+
+  # AUD-F83: an SD-JWT attestation must be bound to something (as Node does).
+  if include_sd_jwt and not rfc_email_mode_is_active and not simple_content_mode_is_active:
+    raise ValueError(
+      "SD-JWT attestation requires content to bind to: email_headers + body, "
+      "content, or content_digest."
+    )
+  if content_digest is not None and not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", content_digest):
+    raise ValueError("content_digest must be 'sha256:' followed by 64 hex digits.")
 
   if content is not None:
     digest_hex = hashlib.sha256(content).hexdigest()
@@ -775,17 +936,22 @@ def prepare_attestation(
         bytes.fromhex(message_hash)
       ).rstrip(b"=").decode("ascii")
 
-    hsm_ref = getattr(creds, "hsm_key_reference", None) or ""
-    if hsm_ref.startswith("piv-"):
-      session_device_type_for_dynamic_trust_tiering = "piv"
-    elif hsm_ref == "secure-enclave":
-      session_device_type_for_dynamic_trust_tiering = "enclave"
-    elif creds.trust_tier == "virtual":
-      session_device_type_for_dynamic_trust_tiering = "vtpm"
-    elif creds.key_algorithm == "tpm-ak":
-      session_device_type_for_dynamic_trust_tiering = "tpm"
+    # Phase 3: Use the override device type if provided, otherwise derive
+    # from the credentials' HSM reference (pre-Phase-3 behavior).
+    if override_session_device_type:
+      session_device_type_for_dynamic_trust_tiering = override_session_device_type
     else:
-      session_device_type_for_dynamic_trust_tiering = None
+      hsm_ref = getattr(creds, "hsm_key_reference", None) or ""
+      if hsm_ref.startswith("piv-"):
+        session_device_type_for_dynamic_trust_tiering = "piv"
+      elif hsm_ref == "secure-enclave":
+        session_device_type_for_dynamic_trust_tiering = "enclave"
+      elif creds.trust_tier == "virtual":
+        session_device_type_for_dynamic_trust_tiering = "vtpm"
+      elif creds.key_algorithm == "tpm-ak":
+        session_device_type_for_dynamic_trust_tiering = "tpm"
+      else:
+        session_device_type_for_dynamic_trust_tiering = None
 
     proof.sd_jwt, proof.sd_jwt_disclosures = _fetch_sd_jwt_proof_for_message(
       api_base_url=api_base_url,
@@ -793,6 +959,7 @@ def prepare_attestation(
       precomputed_nonce=nonce_value,
       proposed_iat=proposed_iat,
       disclosed_claims=disclosed_claims,
+      cnf_jwk=cnf_jwk,
       session_device_type=session_device_type_for_dynamic_trust_tiering,
     )
 
@@ -812,6 +979,7 @@ def _fetch_sd_jwt_proof_for_message(
   proposed_iat: int,
   disclosed_claims: List[str],
   session_device_type: Optional[str] = None,
+  cnf_jwk: Optional[Dict[str, Any]] = None,
 ) -> tuple:
   """Fetch a per-message SD-JWT proof from the issuer.
 
@@ -831,6 +999,8 @@ def _fetch_sd_jwt_proof_for_message(
     "proposed_iat": proposed_iat,
     "disclosed_claims": disclosed_claims,
   }
+  if cnf_jwk is not None:
+    body["cnf_jwk"] = cnf_jwk  # Combined mode (AUD-F47)
   if session_device_type:
     body["device_type"] = session_device_type
 

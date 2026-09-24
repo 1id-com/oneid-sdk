@@ -45,7 +45,7 @@ class TestDeclaredTierEnrollment:
     assert identity.canonical_id == "id-xpwsb-rqgdz-vctkm-nfjhx"
     assert identity.handle == "@id-xpwsb-rqgdz-vctkm-nfjhx"
     assert identity.trust_tier == TrustTier.DECLARED
-    assert identity.key_algorithm == KeyAlgorithm.ED25519  # default
+    assert identity.key_algorithm == KeyAlgorithm.ECDSA_P256  # default (AUD-F22: signs Mode 1 as ES256)
 
   def test_declared_enrollment_stores_credentials(
     self, isolated_credentials_directory, mock_server_declared_enrollment_response

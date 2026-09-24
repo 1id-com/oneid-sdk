@@ -71,6 +71,7 @@ class StoredCredentials:
   display_name: str | None = None
   agent_identity_urn: str | None = None
   identity_certificate_chain_pem: str | None = None
+  device_certificate_chains: dict[str, str] | None = None
   enclave_key_data_representation_b64: str | None = None
   mailpal_email: str | None = None
   mailpal_app_password: str | None = None
@@ -167,6 +168,8 @@ def save_credentials(credentials: StoredCredentials) -> Path:
     credentials_dict["agent_identity_urn"] = credentials.agent_identity_urn
   if credentials.identity_certificate_chain_pem is not None:
     credentials_dict["identity_certificate_chain_pem"] = credentials.identity_certificate_chain_pem
+  if credentials.device_certificate_chains is not None:
+    credentials_dict["device_certificate_chains"] = credentials.device_certificate_chains
   if credentials.enclave_key_data_representation_b64 is not None:
     credentials_dict["enclave_key_data_representation_b64"] = credentials.enclave_key_data_representation_b64
   if credentials.mailpal_email is not None:
@@ -247,6 +250,7 @@ def load_credentials() -> StoredCredentials:
     display_name=credentials_dict.get("display_name"),
     agent_identity_urn=credentials_dict.get("agent_identity_urn"),
     identity_certificate_chain_pem=credentials_dict.get("identity_certificate_chain_pem"),
+    device_certificate_chains=credentials_dict.get("device_certificate_chains"),
     enclave_key_data_representation_b64=credentials_dict.get("enclave_key_data_representation_b64"),
     mailpal_email=credentials_dict.get("mailpal_email"),
     mailpal_app_password=credentials_dict.get("mailpal_app_password"),
@@ -260,6 +264,50 @@ def credentials_exist() -> bool:
       True if the credentials file exists, False otherwise.
   """
   return get_credentials_file_path().exists()
+
+
+def sync_device_certificate_chains_from_server(
+  api_base_url: str | None = None,
+  access_token: str | None = None,
+) -> dict[str, str]:
+  """Fetch per-device certificate chains from the server and store them locally.
+
+  Phase 2: Each device bound to an identity has its own certificate chain
+  where the leaf cert's public key matches that device's signing key.
+  This enables correct Mode 1 CMS attestation from any device.
+
+  If access_token is not provided, obtains one using the stored credentials.
+
+  Returns the device_certificate_chains dict that was stored.
+  """
+  import logging
+  logger = logging.getLogger("oneid.credentials")
+
+  creds = load_credentials()
+  effective_api_base_url = api_base_url or creds.api_base_url or "https://1id.com"
+
+  if not access_token:
+    from .auth import get_token
+    token = get_token()
+    access_token = token.access_token
+
+  from .client import OneIDAPIClient
+  api_client = OneIDAPIClient(api_base_url=effective_api_base_url)
+  response = api_client.get_all_device_certificate_chains(access_token=access_token)
+
+  device_chains = response.get("device_certificate_chains", {})
+  if not device_chains:
+    logger.info("Server returned no per-device certificates (identity may predate Phase 2)")
+    return {}
+
+  creds.device_certificate_chains = device_chains
+  save_credentials(creds)
+
+  logger.info(
+    "Synced %d per-device certificate chain(s) from server",
+    len(device_chains),
+  )
+  return device_chains
 
 
 def delete_credentials() -> bool:

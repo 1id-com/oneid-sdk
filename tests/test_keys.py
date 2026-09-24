@@ -30,9 +30,9 @@ class TestKeyGeneration:
     assert private_pem.startswith(b"-----BEGIN PRIVATE KEY-----")
     assert public_pem.startswith(b"-----BEGIN PUBLIC KEY-----")
 
-  def test_ed25519_is_default_algorithm(self):
-    """The default key algorithm should be Ed25519."""
-    assert DEFAULT_KEY_ALGORITHM == KeyAlgorithm.ED25519
+  def test_ecdsa_p256_is_default_algorithm(self):
+    """The default key algorithm is ECDSA P-256 (the only software key that signs Mode 1 email)."""
+    assert DEFAULT_KEY_ALGORITHM == KeyAlgorithm.ECDSA_P256
 
   def test_ed25519_generates_correct_key_type(self):
     private_pem, _ = generate_keypair(KeyAlgorithm.ED25519)
