@@ -8,7 +8,7 @@ get_token() respectively.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
@@ -131,6 +131,18 @@ class Token:
   token_type: str
   expires_at: datetime
   refresh_token: str | None
+  # Sender constraint (registry-04 "HTTP Message Signatures", OWN-038): the
+  # function that signs an RFC 9421 signature base with the enrolled key that
+  # authenticated for this token (TPM AK, PIV slot key, Secure Enclave key or
+  # declared software key), and that key's JWK (the token's cnf.jwk). The SDK
+  # signs every authenticated request with them; the access token alone is
+  # useless to a thief.
+  airs_request_signer: object = field(default=None, compare=False, repr=False)
+  confirmation_jwk: object = field(default=None, compare=False, repr=False)
+  # issuer clock minus local clock (from the token's iat when it arrived): the
+  # RFC 9421 `created` parameter uses the issuer's clock, so a drifting agent
+  # clock does not make requests look stale or future-dated
+  server_clock_offset_seconds: float = field(default=0.0, compare=False, repr=False)
 
   @property
   def this_token_has_not_yet_expired(self) -> bool:

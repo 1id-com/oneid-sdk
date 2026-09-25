@@ -456,7 +456,7 @@ class OneIDAPIClient:
     return self._make_request(
       "GET",
       f"/api/v1/identity/devices/{device_fingerprint}/certificate",
-      headers={"Authorization": f"Bearer {access_token}"},
+      headers={"Authorization": access_token},  # a Token: signed by _http (a str would be refused)
     )
 
   def get_all_device_certificate_chains(
@@ -470,56 +470,8 @@ class OneIDAPIClient:
     return self._make_request(
       "GET",
       "/api/v1/identity/devices/certificates",
-      headers={"Authorization": f"Bearer {access_token}"},
+      headers={"Authorization": access_token},  # a Token: signed by _http (a str would be refused)
     )
-
-  def get_token_with_client_credentials(
-    self,
-    client_id: str,
-    client_secret: str,
-  ) -> dict[str, Any]:
-    """Get an OAuth2 access token using the client_credentials grant.
-
-    Args:
-        client_id: The Keycloak client ID (e.g., 'id-njshj-zhshb-sqpck-bghgw').
-        client_secret: The Keycloak client secret.
-
-    Returns:
-        Token response dict containing 'access_token', 'token_type',
-        'expires_in', and optionally 'refresh_token'.
-
-    Raises:
-        NetworkError: If the token endpoint cannot be reached.
-        EnrollmentError: If the token request fails.
-    """
-    token_url = f"{self.api_base_url}/realms/agents/protocol/openid-connect/token"
-
-    try:
-      with httpx.Client(timeout=self.timeout_seconds) as http_client:
-        response = http_client.post(
-          token_url,
-          data={
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret,
-          },
-          headers={"User-Agent": USER_AGENT},
-        )
-        response.raise_for_status()
-        return response.json()
-    except httpx.ConnectError as connection_error:
-      raise NetworkError(
-        f"Could not connect to token endpoint {token_url}: {connection_error}"
-      ) from connection_error
-    except httpx.HTTPStatusError as status_error:
-      raise EnrollmentError(
-        f"Token request failed (HTTP {status_error.response.status_code}): "
-        f"{status_error.response.text}"
-      ) from status_error
-    except httpx.HTTPError as http_error:
-      raise NetworkError(
-        f"HTTP error requesting token from {token_url}: {http_error}"
-      ) from http_error
 
   def check_handle_availability(self, handle_name: str) -> dict[str, Any]:
     """Check whether a vanity handle is available.

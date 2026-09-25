@@ -183,16 +183,9 @@ class TestDeclaredEnrollmentAgainstLiveServer:
       requested_handle=handle_name,
     )
 
-    credentials = server_response.get("credentials", {})
-    client_id = credentials["client_id"]
-    client_secret = credentials["client_secret"]
-
-    # Use the credentials to get a token
-    token_response = api_client.get_token_with_client_credentials(
-      client_id,
-      client_secret,
-    )
-    access_token = token_response["access_token"]
+    # The enrollment response carries the first token, sender-constrained to
+    # the enrolled key (no static client secret exists any more; OWN-038).
+    access_token = server_response["initial_tokens"]["access_token"]
 
     # Decode the JWT payload (no signature verification -- just inspection)
     payload_b64 = access_token.split(".")[1]
@@ -211,6 +204,9 @@ class TestDeclaredEnrollmentAgainstLiveServer:
     assert claims.get("sub") == expected_urn, f"sub should be URN {expected_urn}: {claims}"
     assert claims.get("agent_identity_urn") == expected_urn, f"agent_identity_urn missing: {claims}"
     assert claims.get("iss") == "https://1id.com/realms/agents", f"issuer wrong: {claims}"
+    # registry-04: sender-constrained to the enrolled key + the aid claim
+    assert (claims.get("cnf") or {}).get("jwk", {}).get("crv") == "Ed25519", f"cnf.jwk missing: {claims}"
+    assert (claims.get("aid") or {}).get("trust_tier") == "declared", f"aid claim missing: {claims}"
 
     # For declared tier, TPM claims should be absent
     assert claims.get("tpm_manufacturer") is None, "declared tier should not have tpm_manufacturer"

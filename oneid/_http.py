@@ -136,13 +136,25 @@ class Client:
     data: Optional[Dict[str, Any]] = None,
     params: Optional[Dict[str, Any]] = None,
     headers: Optional[Dict[str, str]] = None,
+    airs_proof_of_possession_token: Any = None,
   ) -> Response:
+    """airs_proof_of_possession_token: an oneid Token. Its access token is
+    sent as Authorization and the request (method, final URL, Authorization,
+    Content-Digest of the exact body bytes, Content-Type) is signed with the
+    token's confirmation key -- the enrolled hardware key -- as the
+    registry-04 "HTTP Message Signatures" profile requires (OWN-038)."""
     if json is not None and data is not None:
       raise ValueError("pass json= or data=, not both")
 
     final_url = _build_url(url, params)
     header_map = dict(headers or {})
-    lowered = _lower_header_keys(headers)
+    # An oneid Token given as the Authorization VALUE (instead of a
+    # "Bearer ..." string) means: send it sender-constrained -- the same as
+    # airs_proof_of_possession_token=token. Every SDK call site uses this.
+    for header_name in list(header_map):
+      if header_name.lower() == "authorization" and not isinstance(header_map[header_name], str):
+        airs_proof_of_possession_token = header_map.pop(header_name)
+    lowered = _lower_header_keys(header_map)
     if "user-agent" not in lowered:
       header_map["User-Agent"] = USER_AGENT_FALLBACK
 
@@ -155,6 +167,18 @@ class Client:
       body_bytes = urllib.parse.urlencode(data).encode("utf-8")
       if "content-type" not in lowered:
         header_map["Content-Type"] = "application/x-www-form-urlencoded"
+
+    if airs_proof_of_possession_token is not None:
+      signer = getattr(airs_proof_of_possession_token, "airs_request_signer", None)
+      if signer is None:
+        raise ValueError(
+          "this Token cannot sign requests (it was not issued through oneid.get_token()); "
+          "AIRS tokens are sender-constrained and are never sent as bare bearer tokens")
+      from .airs_http_message_signatures import sign_request_with_token
+      header_map = {k: v for k, v in header_map.items() if k.lower() != "authorization"}
+      header_map["Authorization"] = airs_proof_of_possession_token.authorization_header_value
+      header_map.update(sign_request_with_token(
+        method.upper(), final_url, header_map, body_bytes, airs_proof_of_possession_token))
 
     request = urllib.request.Request(
       final_url, data=body_bytes, headers=header_map, method=method.upper())
@@ -205,12 +229,16 @@ class Client:
         "could not connect to %s: %s" % (final_url, os_error)) from os_error
 
   def get(self, url: str, *, params: Optional[Dict[str, Any]] = None,
-          headers: Optional[Dict[str, str]] = None) -> Response:
-    return self.request("GET", url, params=params, headers=headers)
+          headers: Optional[Dict[str, str]] = None,
+          airs_proof_of_possession_token: Any = None) -> Response:
+    return self.request("GET", url, params=params, headers=headers,
+                        airs_proof_of_possession_token=airs_proof_of_possession_token)
 
   def post(self, url: str, *, json: Any = None,
            data: Optional[Dict[str, Any]] = None,
            params: Optional[Dict[str, Any]] = None,
-           headers: Optional[Dict[str, str]] = None) -> Response:
+           headers: Optional[Dict[str, str]] = None,
+           airs_proof_of_possession_token: Any = None) -> Response:
     return self.request("POST", url, json=json, data=data,
-                        params=params, headers=headers)
+                        params=params, headers=headers,
+                        airs_proof_of_possession_token=airs_proof_of_possession_token)

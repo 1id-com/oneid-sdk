@@ -1,23 +1,25 @@
 """
-Tests for OAuth2 token acquisition and caching.
+Tests for access-token acquisition and caching.
 
 Verifies:
-- Token acquisition via client_credentials grant
-- Token caching (returns cached token when valid)
-- Token refresh when near expiry
-- force_refresh bypasses cache
+- Declared-tier Binding-Proof Authentication: challenge -> nonce signed with
+  the enrolled software key -> verify (registry draft: a static client_secret
+  MUST NOT substitute for binding proof; external review 072 #6)
+- No client_secret is ever sent
+- Token caching (returns cached token when valid), force_refresh, clearing
 - Proper error handling for auth failures
 - NotEnrolledError when no credentials exist
 """
 
-from datetime import datetime, timedelta, timezone
+import base64
 from unittest.mock import MagicMock, patch
 
 import pytest
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from oneid.auth import (
-  TOKEN_REFRESH_MARGIN_SECONDS,
-  _request_token_via_api_proxy,
+  authenticate_with_declared_software_key,
   clear_cached_token,
   get_token,
 )
@@ -25,142 +27,122 @@ from oneid.credentials import StoredCredentials
 from oneid.exceptions import AuthenticationError, NetworkError, NotEnrolledError
 from oneid.identity import Token
 
+ENROLLED_KEY = ec.generate_private_key(ec.SECP256R1())
+NONCE = b"\x07" * 32
 
-def _make_test_stored_credentials() -> StoredCredentials:
+
+def _make_test_stored_credentials(private_key_pem=None) -> StoredCredentials:
   return StoredCredentials(
     client_id="id-tsthj-zhshb-sqpck-bghgw",
-    client_secret="test-secret",
+    client_secret="test-secret-that-must-never-be-sent",
     token_endpoint="https://1id.com/realms/agents/protocol/openid-connect/token",
     api_base_url="https://1id.com",
     trust_tier="declared",
-    key_algorithm="ed25519",
-    private_key_pem="fake-key",
+    key_algorithm="ecdsa-p256",
+    private_key_pem=private_key_pem if private_key_pem is not None else ENROLLED_KEY.private_bytes(
+      serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode(),
   )
 
 
-class TestTokenAcquisition:
-  """Test token request from Keycloak."""
+def _response(status_code, body):
+  response = MagicMock()
+  response.status_code = status_code
+  response.json.return_value = body
+  return response
 
+
+def _challenge_then_verify_responses(mock_keycloak_token_response):
+  def responses():
+    while True:
+      yield _response(200, {"ok": True, "data": {
+        "challenge_id": "ch_test", "nonce_b64": base64.b64encode(NONCE).decode(), "device_type": "declared"}})
+      yield _response(200, {"ok": True, "data": {"authenticated": True, "tokens": mock_keycloak_token_response}})
+  return responses()
+
+
+class TestDeclaredBindingProofAuthentication:
   def setup_method(self):
-    """Clear token cache before each test."""
     clear_cached_token()
 
-  def test_successful_token_request(self, mock_keycloak_token_response):
-    """A 200 response from Keycloak should return a valid Token."""
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = mock_keycloak_token_response
-
+  def test_nonce_is_signed_by_the_enrolled_key_and_no_secret_is_sent(self, mock_keycloak_token_response):
     with patch("oneid.auth.httpx.Client") as MockHTTP:
-      mock_http_instance = MockHTTP.return_value.__enter__.return_value
-      mock_http_instance.post.return_value = mock_response
+      http = MockHTTP.return_value.__enter__.return_value
+      http.post.side_effect = _challenge_then_verify_responses(mock_keycloak_token_response)
+      token = authenticate_with_declared_software_key(credentials=_make_test_stored_credentials())
 
-      token = _request_token_via_api_proxy(_make_test_stored_credentials())
+    assert isinstance(token, Token) and token.access_token == mock_keycloak_token_response["access_token"]
+    challenge_call, verify_call = http.post.call_args_list
+    assert challenge_call.args[0].endswith("/api/v1/auth/challenge")
+    assert challenge_call.kwargs["json"] == {"identity_id": "id-tsthj-zhshb-sqpck-bghgw", "device_type": "declared"}
+    verify_body = verify_call.kwargs["json"]
+    assert verify_call.args[0].endswith("/api/v1/auth/verify")
+    presented_key = serialization.load_pem_public_key(verify_body["public_key_pem"].encode())
+    presented_key.verify(base64.b64decode(verify_body["signature_b64"]), NONCE, ec.ECDSA(hashes.SHA256()))
+    assert presented_key.public_numbers() == ENROLLED_KEY.public_key().public_numbers()
+    for call in http.post.call_args_list:
+      assert "test-secret-that-must-never-be-sent" not in repr(call)
 
-    assert isinstance(token, Token)
-    assert token.access_token == mock_keycloak_token_response["access_token"]
-    assert token.token_type == "Bearer"
-    assert token.this_token_has_not_yet_expired is True
-
-  def test_auth_failure_raises_authentication_error(self):
-    """A 401 response should raise AuthenticationError."""
-    mock_response = MagicMock()
-    mock_response.status_code = 401
-    mock_response.json.return_value = {
-      "error": "invalid_client",
-      "error_description": "Invalid client credentials",
-    }
-
+  def test_get_token_uses_binding_proof_for_declared(self, mock_keycloak_token_response):
     with patch("oneid.auth.httpx.Client") as MockHTTP:
-      mock_http_instance = MockHTTP.return_value.__enter__.return_value
-      mock_http_instance.post.return_value = mock_response
+      http = MockHTTP.return_value.__enter__.return_value
+      http.post.side_effect = _challenge_then_verify_responses(mock_keycloak_token_response)
+      get_token(credentials=_make_test_stored_credentials())
+    assert [call.args[0].rsplit("/", 1)[-1] for call in http.post.call_args_list] == ["challenge", "verify"]
 
-      with pytest.raises(AuthenticationError, match="Invalid client credentials"):
-        _request_token_via_api_proxy(_make_test_stored_credentials())
+  def test_missing_enrolled_key_raises(self):
+    with pytest.raises(AuthenticationError, match="no enrolled signing key"):
+      authenticate_with_declared_software_key(credentials=_make_test_stored_credentials(private_key_pem=""))
 
-  def test_network_error_on_connection_failure(self):
-    """Connection failure should raise NetworkError."""
+  def test_rejected_proof_raises_authentication_error(self):
+    with patch("oneid.auth.httpx.Client") as MockHTTP:
+      http = MockHTTP.return_value.__enter__.return_value
+      http.post.side_effect = [
+        _response(200, {"ok": True, "data": {"challenge_id": "ch_test", "nonce_b64": base64.b64encode(NONCE).decode()}}),
+        _response(401, {"ok": False, "error": {"message": "The presented key is not this identity's enrolled key."}}),
+      ]
+      with pytest.raises(AuthenticationError, match="not this identity's enrolled key"):
+        authenticate_with_declared_software_key(credentials=_make_test_stored_credentials())
+
+  def test_network_errors_raise_network_error(self):
     from oneid import _http
-
-    with patch("oneid.auth.httpx.Client") as MockHTTP:
-      mock_http_instance = MockHTTP.return_value.__enter__.return_value
-      mock_http_instance.post.side_effect = _http.ConnectError("Connection refused")
-
-      with pytest.raises(NetworkError):
-        _request_token_via_api_proxy(_make_test_stored_credentials())
-
-  def test_network_error_on_timeout(self):
-    """Timeout should raise NetworkError."""
-    from oneid import _http
-
-    with patch("oneid.auth.httpx.Client") as MockHTTP:
-      mock_http_instance = MockHTTP.return_value.__enter__.return_value
-      mock_http_instance.post.side_effect = _http.TimeoutException("Timed out")
-
-      with pytest.raises(NetworkError):
-        _request_token_via_api_proxy(_make_test_stored_credentials())
+    for failure in (_http.ConnectError("Connection refused"), _http.TimeoutException("Timed out")):
+      with patch("oneid.auth.httpx.Client") as MockHTTP:
+        MockHTTP.return_value.__enter__.return_value.post.side_effect = failure
+        with pytest.raises(NetworkError):
+          authenticate_with_declared_software_key(credentials=_make_test_stored_credentials())
 
 
 class TestTokenCaching:
-  """Test the in-memory token cache."""
+  """Test the in-memory token cache (each login = challenge + verify)."""
 
   def setup_method(self):
     clear_cached_token()
 
-  def test_second_call_returns_cached_token(self, mock_keycloak_token_response):
-    """get_token() should return the cached token if it's still valid."""
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = mock_keycloak_token_response
-
+  def _count_logins(self, mock_keycloak_token_response, action):
     creds = _make_test_stored_credentials()
-
     with patch("oneid.auth.httpx.Client") as MockHTTP:
-      mock_http_instance = MockHTTP.return_value.__enter__.return_value
-      mock_http_instance.post.return_value = mock_response
+      http = MockHTTP.return_value.__enter__.return_value
+      http.post.side_effect = _challenge_then_verify_responses(mock_keycloak_token_response)
+      action(creds)
+    return http.post.call_count // 2
 
-      token1 = get_token(credentials=creds)
-      token2 = get_token(credentials=creds)
-
-    # Should have only made ONE HTTP request (second call used cache)
-    assert mock_http_instance.post.call_count == 1
-    assert token1.access_token == token2.access_token
+  def test_second_call_returns_cached_token(self, mock_keycloak_token_response):
+    def action(creds):
+      assert get_token(credentials=creds).access_token == get_token(credentials=creds).access_token
+    assert self._count_logins(mock_keycloak_token_response, action) == 1
 
   def test_force_refresh_bypasses_cache(self, mock_keycloak_token_response):
-    """force_refresh=True should always make a new request."""
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = mock_keycloak_token_response
-
-    creds = _make_test_stored_credentials()
-
-    with patch("oneid.auth.httpx.Client") as MockHTTP:
-      mock_http_instance = MockHTTP.return_value.__enter__.return_value
-      mock_http_instance.post.return_value = mock_response
-
+    def action(creds):
       get_token(credentials=creds)
       get_token(credentials=creds, force_refresh=True)
-
-    # Both calls should have made HTTP requests
-    assert mock_http_instance.post.call_count == 2
+    assert self._count_logins(mock_keycloak_token_response, action) == 2
 
   def test_clear_cached_token_forces_new_request(self, mock_keycloak_token_response):
-    """clear_cached_token() followed by get_token() should make a new request."""
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = mock_keycloak_token_response
-
-    creds = _make_test_stored_credentials()
-
-    with patch("oneid.auth.httpx.Client") as MockHTTP:
-      mock_http_instance = MockHTTP.return_value.__enter__.return_value
-      mock_http_instance.post.return_value = mock_response
-
+    def action(creds):
       get_token(credentials=creds)
       clear_cached_token()
       get_token(credentials=creds)
-
-    assert mock_http_instance.post.call_count == 2
+    assert self._count_logins(mock_keycloak_token_response, action) == 2
 
 
 class TestGetTokenWithoutCredentials:

@@ -915,7 +915,7 @@ def prepare_attestation(
 
   token = get_token()
   auth_headers = {
-    "Authorization": f"Bearer {token.access_token}",
+    "Authorization": token,  # Token object: _http signs the request with the enrolled key
     "User-Agent": USER_AGENT,
   }
 

@@ -132,7 +132,7 @@ def _get_auth_headers() -> Dict[str, str]:
   """Get authorization headers using the current 1id token."""
   token = get_token()
   return {
-    "Authorization": f"Bearer {token.access_token}",
+    "Authorization": token,  # Token object: _http signs the request with the enrolled key
     "User-Agent": USER_AGENT,
   }
 
@@ -631,7 +631,7 @@ def send(
           from .attestation import _fetch_binding_jws
           token_for_binding = get_token()
           binding_auth_headers = {
-            "Authorization": f"Bearer {token_for_binding.access_token}",
+            "Authorization": token_for_binding,  # Token object: _http signs the request with the enrolled key
             "User-Agent": USER_AGENT,
           }
           api_base = oneid_api_url or creds.api_base_url or "https://1id.com"
@@ -879,7 +879,7 @@ def get_contact_token(
 
   token = get_token()
   auth_headers = {
-    "Authorization": f"Bearer {token.access_token}",
+    "Authorization": token,  # Token object: _http signs the request with the enrolled key
     "User-Agent": USER_AGENT,
   }
 

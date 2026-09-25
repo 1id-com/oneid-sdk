@@ -17,9 +17,12 @@ print(f"Enrolled: {identity.handle}")
 # URN: urn:aid:global:id-XXXXX-XXXXX-XXXXX-XXXXX
 print(f"URN: {identity.agent_identity_urn}")
 
-# Get an OAuth2 token for API access
-token = oneid.get_token()
-headers = {"Authorization": f"Bearer {token.access_token}"}
+# Call an API that accepts 1ID tokens. Tokens are sender-constrained (cnf.jwk):
+# each request is signed with your enrolled key (RFC 9421), so a copied token
+# alone is refused. This does the signing for you:
+response = oneid.send_http_request_with_sender_constrained_token(
+  "GET", "https://1id.com/api/v1/identity/devices")
+# From the shell: oneid request GET https://1id.com/api/v1/identity/devices
 
 # Check identity
 me = oneid.whoami()

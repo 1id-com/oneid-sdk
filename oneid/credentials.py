@@ -288,8 +288,7 @@ def sync_device_certificate_chains_from_server(
 
   if not access_token:
     from .auth import get_token
-    token = get_token()
-    access_token = token.access_token
+    access_token = get_token()  # the Token itself: the request is signed with the enrolled key
 
   from .client import OneIDAPIClient
   api_client = OneIDAPIClient(api_base_url=effective_api_base_url)

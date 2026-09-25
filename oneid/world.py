@@ -146,7 +146,7 @@ def fetch_world_status_from_server(
   raw_data = api_client._make_request(
     "GET",
     "/api/v1/identity/world",
-    headers={"Authorization": token.authorization_header_value},
+    headers={"Authorization": token},  # Token object: _http signs the request with the enrolled key
   )
 
   _cached_world_response = raw_data

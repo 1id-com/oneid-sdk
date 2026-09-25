@@ -190,7 +190,7 @@ def _make_authenticated_request(
 
   url = f"{api_client.api_base_url}{path}"
   headers = {
-    "Authorization": token.authorization_header_value,
+    "Authorization": token,  # Token object: _http signs the request with the enrolled key
   }
 
   from . import _http as httpx  # stdlib-backed drop-in (no httpx dependency)

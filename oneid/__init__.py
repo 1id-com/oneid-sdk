@@ -11,9 +11,12 @@ Quick start (recommended):
     identity = oneid.get_or_create_identity(display_name="Sparky")
     print(f"I am {identity}")
 
-    # Get an OAuth2 Bearer token for API calls
-    token = oneid.get_token()
-    print(f"Bearer {token.access_token}")
+    # Get an access token. It is sender-constrained (cnf.jwk): requests must
+    # also be signed with the enrolled key -- the SDK does this for its own
+    # calls, and airs_http_message_signatures.sign_request does it for yours.
+    response = oneid.send_http_request_with_sender_constrained_token(
+      "GET", "https://1id.com/api/v1/identity/devices")
+    print(response.status_code, response.json())
 
 The SDK auto-detects your hardware (TPM, YubiKey, Secure Enclave) and
 enrolls at the highest available trust tier. No arguments needed.
@@ -111,6 +114,21 @@ from .credential_pointers import (
   CredentialPointerListResult,
 )
 from ._version import __version__
+from . import airs_http_message_signatures
+
+
+def send_http_request_with_sender_constrained_token(method, url, json=None, headers=None, token=None):
+  """Send one HTTP request carrying this agent's access token SENDER-CONSTRAINED:
+  Authorization plus an RFC 9421 signature by the enrolled key (TPM, PIV,
+  Secure Enclave or declared key) over the exact method, URL and body
+  (registry-04 "HTTP Message Signatures"). 1ID tokens carry cnf.jwk, so a
+  service that verifies them refuses the token without this signature.
+  Returns the response (status_code, text, json()); 4xx/5xx are returned,
+  not raised. token defaults to get_token()."""
+  from . import _http
+  signed_headers = dict(headers or {})
+  signed_headers["Authorization"] = token or get_token()
+  return _http.Client().request(method.upper(), url, json=json, headers=signed_headers)
 
 
 def _build_identity_from_local_credentials() -> Identity:
@@ -311,6 +329,9 @@ def setup_tbs() -> bool:
 
 # -- Public API --
 __all__ = [
+  # Sender-constrained requests (RFC 9421; sign_request / verify_request inside)
+  "send_http_request_with_sender_constrained_token",
+  "airs_http_message_signatures",
   # Core functions
   "enroll",
   "get_or_create_identity",

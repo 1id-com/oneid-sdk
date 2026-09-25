@@ -263,6 +263,42 @@ def _download_binary_from_github_release(binary_name: str, destination_path: Pat
         pass
 
 
+# 2.2.0: `sign` hashes inputs over 1024 bytes with a TPM hash sequence, which
+# every sender-constrained request (RFC 9421 signature base, OWN-038) needs;
+# 2.1.0 was the corrected enrollment proof (review 072 #1).
+MINIMUM_ONEID_ENROLL_HELPER_VERSION = (2, 2, 0)
+_helper_versions_already_checked: dict = {}
+
+
+def _parse_version_triple(version_text) -> tuple:
+  try:
+    return tuple(int(part) for part in str(version_text).strip().lstrip("v").split(".")[:3])
+  except ValueError:
+    return (0, 0, 0)
+
+
+def _helper_binary_meets_minimum_version(binary_path: Path) -> bool:
+  """Run `oneid-enroll version --json` once per (path, mtime) and compare
+  with MINIMUM_ONEID_ENROLL_HELPER_VERSION (OWN-026: a stale cached helper
+  must not be used just because it exists)."""
+  try:
+    cache_key = (str(binary_path), binary_path.stat().st_mtime)
+  except OSError:
+    return False
+  if cache_key not in _helper_versions_already_checked:
+    import json as _json
+    reported_version = None
+    try:
+      completed = subprocess.run([str(binary_path), "version", "--json"], capture_output=True,
+                                 text=True, timeout=15)
+      reported_version = _json.loads(completed.stdout[completed.stdout.index("{"):]).get("version")
+    except Exception:
+      reported_version = None
+    _helper_versions_already_checked[cache_key] = (
+      _parse_version_triple(reported_version) >= MINIMUM_ONEID_ENROLL_HELPER_VERSION)
+  return _helper_versions_already_checked[cache_key]
+
+
 def ensure_binary_available() -> Path:
   """Ensure the oneid-enroll binary is available, downloading if needed.
 
@@ -277,17 +313,19 @@ def ensure_binary_available() -> Path:
       BinaryNotFoundError: If the binary cannot be found or downloaded.
   """
   binary_path = find_binary()
-  if binary_path is not None:
+  if binary_path is not None and _helper_binary_meets_minimum_version(binary_path):
     return binary_path
 
-  # Binary not found locally -- attempt auto-download from GitHub release
+  # Missing or older than MINIMUM_ONEID_ENROLL_HELPER_VERSION -- download the
+  # current release into the cache (replacing a stale cached copy).
   binary_name = _get_platform_binary_name()
   cache_dir = _get_binary_cache_directory()
   destination = cache_dir / binary_name
 
   logger.info(
-    "oneid-enroll binary not found locally. "
-    "Attempting auto-download from GitHub release..."
+    "oneid-enroll binary %s. Attempting auto-download from GitHub release...",
+    "not found locally" if binary_path is None else
+    f"at {binary_path} is older than {'.'.join(map(str, MINIMUM_ONEID_ENROLL_HELPER_VERSION))}",
   )
 
   try:

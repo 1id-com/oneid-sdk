@@ -3,7 +3,8 @@ Command-line interface for the 1id.com SDK.
 
 Usage:
     oneid whoami          -- Show enrolled identity info
-    oneid token           -- Print a fresh bearer token (for scripting)
+    oneid token           -- Print a fresh access token (inspection only: it is sender-constrained)
+    oneid request M URL   -- Send an HTTP request signed with your enrolled key
     oneid enroll          -- Enroll this machine (interactive)
     oneid status          -- Check if enrolled
 
@@ -14,9 +15,11 @@ Examples:
     # Enroll at sovereign tier (requires TPM)
     oneid enroll --tier sovereign
 
-    # Get a bearer token for scripting
-    TOKEN=$(oneid token)
-    curl -H "Authorization: Bearer $TOKEN" https://api.example.com/
+    # Call an API that accepts 1ID tokens. Tokens are sender-constrained
+    # (cnf.jwk): every request must carry an RFC 9421 signature by your
+    # enrolled key, so `curl -H "Authorization: Bearer ..."` is refused.
+    oneid request GET https://1id.com/api/v1/identity/devices
+    oneid request POST https://example.com/api --data '{"hello": "world"}'
 
     # Check who you are
     oneid whoami
@@ -66,8 +69,37 @@ def _command_whoami(args: argparse.Namespace) -> int:
   return 0
 
 
+def _command_request(args: argparse.Namespace) -> int:
+  """Send one HTTP request with the current token, sender-constrained
+  (Authorization + an RFC 9421 signature by the enrolled key), and print the
+  response body. The scripting replacement for curl with a bearer token."""
+  from . import get_token, send_http_request_with_sender_constrained_token
+  from .exceptions import AuthenticationError, NotEnrolledError
+
+  try:
+    token = get_token()
+  except (NotEnrolledError, AuthenticationError) as token_error:
+    print(f"Cannot get a token: {token_error}", file=sys.stderr)
+    return 1
+  json_body = None
+  if args.data is not None:
+    try:
+      json_body = json.loads(args.data)
+    except json.JSONDecodeError as json_error:
+      print(f"--data must be JSON: {json_error}", file=sys.stderr)
+      return 2
+  response = send_http_request_with_sender_constrained_token(
+    args.method, args.url, json=json_body, token=token)
+  sys.stdout.write(response.text)
+  if not response.text.endswith("\n"):
+    sys.stdout.write("\n")
+  return 0 if 200 <= response.status_code < 300 else 1
+
+
 def _command_token(args: argparse.Namespace) -> int:
-  """Print a fresh OAuth2 bearer token to stdout."""
+  """Print a fresh access token to stdout (inspection only: it is
+  sender-constrained, so a request carrying it must also be signed with the
+  enrolled key -- use `oneid request`)."""
   from . import get_token
   from .exceptions import AuthenticationError, NotEnrolledError
 
@@ -182,9 +214,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
   whoami_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
   # -- token --
-  token_parser = subparsers.add_parser("token", help="Print a fresh bearer token")
+  token_parser = subparsers.add_parser(
+    "token", help="Print a fresh access token (sender-constrained; use 'oneid request' to call APIs)")
   token_parser.add_argument("--json", action="store_true", help="Output as JSON (includes expiry)")
   token_parser.add_argument("--refresh", action="store_true", help="Force token refresh")
+
+  # -- request --
+  request_parser = subparsers.add_parser(
+    "request", help="Send an HTTP request signed with your enrolled key (sender-constrained token)")
+  request_parser.add_argument("method", help="HTTP method, e.g. GET or POST")
+  request_parser.add_argument("url", help="Absolute URL")
+  request_parser.add_argument("--data", default=None, help="JSON request body")
 
   # -- enroll --
   enroll_parser = subparsers.add_parser("enroll", help="Enroll this machine with 1id.com")
@@ -211,6 +251,7 @@ def main() -> int:
   command_dispatch = {
     "whoami": _command_whoami,
     "token": _command_token,
+    "request": _command_request,
     "enroll": _command_enroll,
     "status": _command_status,
   }

@@ -137,7 +137,7 @@ def enroll(
       f"(trust tier: {existing_credentials.trust_tier}). "
       f"Your identity is ready to use right now:\n"
       f"  world = oneid.status()     # full picture: identity, services, guidance\n"
-      f"  token = oneid.get_token()  # Bearer token for API calls\n"
+      f"  token = oneid.get_token()  # sender-constrained: sign requests (oneid request / sign_request)\n"
       f"  me = oneid.get_or_create_identity(get_only=True)  # identity object\n"
       f"Creating a second identity on the same machine is not supported. "
       f"Use oneid.status() to see your current identity and connected services."
