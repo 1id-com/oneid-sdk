@@ -17,6 +17,8 @@ Skip conditions:
 
 import json
 import base64
+import os
+
 import pytest
 
 from oneid.auth import clear_cached_token, get_token
@@ -30,6 +32,20 @@ pytestmark = pytest.mark.skipif(
   not credentials_exist(),
   reason="No credentials file found -- agent not enrolled on this machine",
 )
+
+# Live tests enroll REAL identities at https://1id.com: opt-in only
+# (ONEID_RUN_LIVE_TESTS=1, same rule as the Node suite), and never on the
+# machine's real credential file.
+pytestmark = [
+  pytest.mark.skipif(os.environ.get("ONEID_RUN_LIVE_TESTS") != "1",
+                     reason="live test: set ONEID_RUN_LIVE_TESTS=1 to run it"),
+  pytestmark,
+]
+
+
+@pytest.fixture(autouse=True)
+def never_touch_the_machines_real_identity(isolated_credentials_directory):
+  yield isolated_credentials_directory
 
 
 def _decode_jwt_payload_without_verification(jwt_string):

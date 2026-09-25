@@ -42,6 +42,7 @@ import email.utils
 import logging
 import os
 import smtplib
+import ssl
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -51,7 +52,7 @@ from ._version import USER_AGENT
 from .auth import get_token
 from .attestation import prepare_attestation, AttestationProof
 from .credentials import load_credentials, save_credentials
-from .exceptions import AuthenticationError, NetworkError, NotEnrolledError
+from .exceptions import AttestationGenerationError, AuthenticationError, NetworkError, NotEnrolledError
 
 logger = logging.getLogger("oneid.mailpal")
 
@@ -429,6 +430,7 @@ def send(
   deliver: bool = True,
   signing_device_type: Optional[str] = None,
   piv_serial_number: Optional[int] = None,
+  require_requested_attestation: bool = True,
 ) -> SendResult:
   """
   Send an attested email via direct SMTP submission to smtp.mailpal.com.
@@ -605,6 +607,8 @@ def send(
   mode2_sd_jwt_proof = None
   mode1_direct_attestation_proof = None
   folded_hardware_trust_proof_header_line = None
+  # AUD-F28: why each requested piece is missing (checked before sending).
+  attestation_failure_reasons: List[str] = []
 
   if include_attestation:
     include_sd_jwt_mode = attestation_mode in ("sd-jwt", "both")
@@ -641,8 +645,10 @@ def send(
             logger.info("Fetched Registrar Binding JWS for Mode 1")
           else:
             logger.warning("Binding JWS not available; Mode 1 will lack aid and bind")
+            attestation_failure_reasons.append("Registrar binding JWS for Mode 1 was not available")
         except Exception as binding_error:
           logger.warning("Failed to fetch binding JWS: %s", binding_error)
+          attestation_failure_reasons.append(f"Registrar binding JWS for Mode 1 could not be fetched: {binding_error}")
 
     def _request_and_fold_mode2_proof(cnf_jwk_for_combined_mode, additional_disclosed_claims):
       requested_disclosed_claims = list(disclosed_claims) if disclosed_claims is not None else ["aid"]
@@ -675,6 +681,7 @@ def send(
           mode2_sd_jwt_proof, folded_hardware_trust_proof_header_line = _request_and_fold_mode2_proof(None, [])
       except Exception as mode2_error:
         logger.warning("Mode 2 (SD-JWT) attestation failed: %s", mode2_error)
+        attestation_failure_reasons.append(f"Mode 2 (Hardware-Trust-Proof) failed: {mode2_error}")
         mode2_sd_jwt_proof, folded_hardware_trust_proof_header_line = None, None
 
     if folded_hardware_trust_proof_header_line:
@@ -696,6 +703,22 @@ def send(
         )
       except Exception as mode1_error:
         logger.warning("Mode 1 (direct) attestation failed: %s", mode1_error)
+        attestation_failure_reasons.append(f"Mode 1 (Hardware-Attestation) failed: {mode1_error}")
+
+    # AUD-F28: the caller asked for these proofs; do not silently send without them.
+    if require_requested_attestation:
+      if include_direct_mode and mode1_direct_attestation_proof is None and not any(
+          reason.startswith("Mode 1") for reason in attestation_failure_reasons):
+        attestation_failure_reasons.append("Mode 1 (Hardware-Attestation) produced no proof")
+      if include_sd_jwt_mode and mode2_sd_jwt_proof is None and not any(
+          reason.startswith("Mode 2") for reason in attestation_failure_reasons):
+        attestation_failure_reasons.append("Mode 2 (Hardware-Trust-Proof) produced no proof")
+      if attestation_failure_reasons:
+        raise AttestationGenerationError(
+          f"Requested attestation_mode={attestation_mode!r} could not be produced, so the message was "
+          f"not sent: {'; '.join(attestation_failure_reasons)}. "
+          f"Pass require_requested_attestation=False to send with whatever proofs succeeded."
+        )
 
     # INV-E3: a Mode 2 proof carrying the Combined-mode cnf must never travel
     # without its Mode 1 (verifiers must reject that rather than degrade), so
@@ -772,9 +795,13 @@ def send(
   if not envelope_recipients:
     raise ValueError("No valid recipient email addresses found in to/cc/bcc.")
 
+  # AUD-F30: smtplib's default TLS context does not verify the server; always
+  # verify the certificate chain and host name (as the Node SDK does).
+  verifying_tls_context = ssl.create_default_context()
   try:
     if effective_smtp_security == "tls":
-      with smtplib.SMTP_SSL(effective_smtp_host, effective_smtp_port, timeout=_SMTP_TIMEOUT_SECONDS) as smtp_connection:
+      with smtplib.SMTP_SSL(effective_smtp_host, effective_smtp_port, timeout=_SMTP_TIMEOUT_SECONDS,
+                            context=verifying_tls_context) as smtp_connection:
         smtp_connection.ehlo()
         if effective_smtp_auth_username and effective_smtp_auth_password:
           smtp_connection.login(effective_smtp_auth_username, effective_smtp_auth_password)
@@ -782,7 +809,7 @@ def send(
     elif effective_smtp_security == "starttls":
       with smtplib.SMTP(effective_smtp_host, effective_smtp_port, timeout=_SMTP_TIMEOUT_SECONDS) as smtp_connection:
         smtp_connection.ehlo()
-        smtp_connection.starttls()
+        smtp_connection.starttls(context=verifying_tls_context)
         smtp_connection.ehlo()
         if effective_smtp_auth_username and effective_smtp_auth_password:
           smtp_connection.login(effective_smtp_auth_username, effective_smtp_auth_password)

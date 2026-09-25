@@ -177,10 +177,24 @@ def save_credentials(credentials: StoredCredentials) -> Path:
   if credentials.mailpal_app_password is not None:
     credentials_dict["mailpal_app_password"] = credentials.mailpal_app_password
 
-  credentials_file_path.write_text(
-    json.dumps(credentials_dict, indent=2) + "\n",
-    encoding="utf-8",
-  )
+  # AUD-F71: the secrets never sit in a world-readable file -- write a temporary
+  # file that is CREATED owner-only (0600), then atomically replace the real one
+  # (also no half-written credentials if the process dies mid-write).
+  import secrets as _secrets
+  temporary_file_path = credentials_file_path.with_name(
+    f"{credentials_file_path.name}.tmp-{_secrets.token_hex(4)}")
+  temporary_file_descriptor = os.open(
+    str(temporary_file_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+  try:
+    with os.fdopen(temporary_file_descriptor, "w", encoding="utf-8") as temporary_file:
+      temporary_file.write(json.dumps(credentials_dict, indent=2) + "\n")
+    os.replace(temporary_file_path, credentials_file_path)
+  except BaseException:
+    try:
+      temporary_file_path.unlink()
+    except OSError:
+      pass
+    raise
 
   _set_owner_only_permissions(credentials_file_path)
 
@@ -264,6 +278,33 @@ def credentials_exist() -> bool:
       True if the credentials file exists, False otherwise.
   """
   return get_credentials_file_path().exists()
+
+
+def local_signing_device_type_for_credentials(credentials: StoredCredentials) -> str | None:
+  """Which local device signs for these credentials: "piv", "enclave", "tpm",
+  "software", or None. The ENROLLED LOCAL BINDING decides (hsm_key_reference:
+  "piv-*" = YubiKey, "secure-enclave" = Secure Enclave, any other reference =
+  TPM AK); the trust tier is only the fallback when no reference is stored. An
+  identity's tier and its local device differ after recovery or device addition
+  (AUD-F66, AUD-LOST1). Same rule as the Node SDK.
+  """
+  key_reference = (credentials.hsm_key_reference or "").strip()
+  if key_reference.startswith("piv-"):
+    return "piv"
+  if key_reference == "secure-enclave":
+    return "enclave"
+  if key_reference:
+    return "tpm"
+  trust_tier = credentials.trust_tier or "declared"
+  if trust_tier == "portable":
+    return "piv"
+  if trust_tier == "enclave":
+    return "enclave"
+  if trust_tier in ("sovereign", "virtual") or credentials.key_algorithm == "tpm-ak":
+    return "tpm"
+  if credentials.private_key_pem:
+    return "software"
+  return None
 
 
 def sync_device_certificate_chains_from_server(

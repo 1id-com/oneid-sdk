@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from . import _http as httpx  # stdlib-backed drop-in (no httpx dependency)
 
 from ._version import USER_AGENT
-from .credentials import StoredCredentials, load_credentials
+from .credentials import StoredCredentials, load_credentials, local_signing_device_type_for_credentials
 from .exceptions import (
   AuthenticationError,
   HardwareDeviceNotPresentError,
@@ -50,8 +50,24 @@ _TIERS_USING_TPM = frozenset({"sovereign", "virtual"})
 _TIERS_USING_PIV = frozenset({"portable"})
 _TIERS_USING_ENCLAVE = frozenset({"enclave"})
 
-# -- Module-level token cache --
-_cached_token: Token | None = None
+# -- Token cache, one entry per identity (AUD-F55) --
+# A process can hold several AIRS identities; a cached token is returned only
+# for the identity (token endpoint, client, enrolled key) it was issued to.
+_cached_tokens_by_identity: dict = {}
+
+
+def _token_cache_key_for_credentials(credentials: StoredCredentials) -> tuple:
+  import hashlib
+  return (
+    credentials.token_endpoint or credentials.api_base_url or "",
+    credentials.client_id or "",
+    credentials.hsm_key_reference or "",
+    hashlib.sha256((credentials.private_key_pem or "").encode("utf-8")).hexdigest(),
+  )
+
+
+def _remember_token_for_credentials(credentials: StoredCredentials, token: Token) -> None:
+  _cached_tokens_by_identity[_token_cache_key_for_credentials(credentials)] = token
 
 
 def get_token(
@@ -86,84 +102,57 @@ def get_token(
       AuthenticationError: If the token request fails.
       NetworkError: If the token endpoint cannot be reached.
   """
-  global _cached_token
-
-  if not force_refresh and _cached_token is not None:
-    margin = timedelta(seconds=TOKEN_REFRESH_MARGIN_SECONDS)
-    if datetime.now(timezone.utc) + margin < _cached_token.expires_at:
-      return _cached_token
-
   if credentials is None:
     credentials = load_credentials()
 
-  if credentials.trust_tier in _TIERS_REQUIRING_HARDWARE_AUTH:
-    token = _authenticate_with_hardware_challenge_response(credentials)
-    _cached_token = token
-    return token
+  cached_token = _cached_tokens_by_identity.get(_token_cache_key_for_credentials(credentials))
+  if not force_refresh and cached_token is not None:
+    margin = timedelta(seconds=TOKEN_REFRESH_MARGIN_SECONDS)
+    if datetime.now(timezone.utc) + margin < cached_token.expires_at:
+      return cached_token
 
-  token = authenticate_with_declared_software_key(credentials=credentials)
-  _cached_token = token
+  if local_signing_device_type_for_credentials(credentials) in ("piv", "enclave", "tpm"):
+    token = _authenticate_with_hardware_challenge_response(credentials)
+  else:
+    token = authenticate_with_declared_software_key(credentials=credentials)
+  _remember_token_for_credentials(credentials, token)
   return token
 
 
 def _authenticate_with_hardware_challenge_response(credentials: StoredCredentials) -> Token:
-  """Route to TPM or PIV challenge-response based on local device type.
-
-  Uses hsm_key_reference to determine which signing path to use, with
-  trust_tier as a fallback. This is necessary because an identity can
-  have multiple device types (e.g. sovereign tier recovered via PIV on
-  a different machine stores trust_tier=sovereign but hsm_key_reference=piv-slot-9a).
+  """Route to PIV, TPM or Secure Enclave challenge-response by the ENROLLED
+  LOCAL DEVICE (local_signing_device_type_for_credentials: hsm_key_reference
+  first, trust tier only as the fallback), because an identity's tier and its
+  local device differ after recovery or device addition (e.g. a sovereign
+  identity recovered via PIV stores hsm_key_reference=piv-slot-9a; AUD-F66,
+  AUD-LOST1). Same rule as the Node SDK.
 
   Raises HardwareDeviceNotPresentError on any hardware failure -- never
   falls back to client_credentials.
   """
-  local_device_is_piv = (
-    getattr(credentials, "hsm_key_reference", None) or ""
-  ).startswith("piv-")
-
-  if local_device_is_piv or credentials.trust_tier in _TIERS_USING_PIV:
-    try:
-      logger.debug("Attempting PIV-based passwordless authentication...")
-      return authenticate_with_piv(credentials=credentials)
-    except HardwareDeviceNotPresentError:
-      raise
-    except Exception as piv_error:
-      raise HardwareDeviceNotPresentError(
-        f"PIV authentication failed and hardware is required for "
-        f"{credentials.trust_tier} tier. YubiKey may be absent or "
-        f"inaccessible: {piv_error}"
-      ) from piv_error
-
-  if credentials.trust_tier in _TIERS_USING_TPM:
-    try:
-      logger.debug("Attempting TPM-based passwordless authentication...")
-      return authenticate_with_tpm(credentials=credentials)
-    except HardwareDeviceNotPresentError:
-      raise
-    except Exception as tpm_error:
-      raise HardwareDeviceNotPresentError(
-        f"TPM authentication failed and hardware is required for "
-        f"{credentials.trust_tier} tier. Device may be absent or "
-        f"inaccessible: {tpm_error}"
-      ) from tpm_error
-
-  if credentials.trust_tier in _TIERS_USING_ENCLAVE:
-    try:
-      logger.debug("Attempting Secure Enclave passwordless authentication...")
-      return authenticate_with_enclave(credentials=credentials)
-    except HardwareDeviceNotPresentError:
-      raise
-    except Exception as enclave_error:
-      raise HardwareDeviceNotPresentError(
-        f"Secure Enclave authentication failed and hardware is required for "
-        f"{credentials.trust_tier} tier. Enclave may be absent or "
-        f"inaccessible: {enclave_error}"
-      ) from enclave_error
-
-  raise HardwareDeviceNotPresentError(
-    f"Trust tier '{credentials.trust_tier}' requires hardware but no "
-    f"supported authentication method is available."
-  )
+  device_type = local_signing_device_type_for_credentials(credentials)
+  authenticators = {
+    "piv": ("PIV", "YubiKey", authenticate_with_piv),
+    "tpm": ("TPM", "Device", authenticate_with_tpm),
+    "enclave": ("Secure Enclave", "Enclave", authenticate_with_enclave),
+  }
+  if device_type not in authenticators:
+    raise HardwareDeviceNotPresentError(
+      f"Trust tier '{credentials.trust_tier}' requires hardware but no "
+      f"supported authentication method is available."
+    )
+  mechanism_name, device_name, authenticate = authenticators[device_type]
+  try:
+    logger.debug("Attempting %s-based passwordless authentication...", mechanism_name)
+    return authenticate(credentials=credentials)
+  except HardwareDeviceNotPresentError:
+    raise
+  except Exception as hardware_error:
+    raise HardwareDeviceNotPresentError(
+      f"{mechanism_name} authentication failed and hardware is required for "
+      f"{credentials.trust_tier} tier. {device_name} may be absent or "
+      f"inaccessible: {hardware_error}"
+    ) from hardware_error
 
 
 def _convert_ecdsa_signature_to_rfc9421_raw_if_der_encoded(signature: bytes) -> bytes:
@@ -282,7 +271,6 @@ def authenticate_with_declared_software_key(
   """
   import base64
 
-  global _cached_token
 
   if credentials is None:
     credentials = load_credentials()
@@ -339,7 +327,7 @@ def authenticate_with_declared_software_key(
     confirmation_jwk=confirmation_jwk_from_access_token(tokens["access_token"]),
     server_clock_offset_seconds=_server_clock_offset_seconds(tokens["access_token"]),
   )
-  _cached_token = token
+  _remember_token_for_credentials(credentials, token)
   return token
 
 
@@ -348,8 +336,7 @@ def clear_cached_token() -> None:
 
   Useful for testing or when credentials have changed.
   """
-  global _cached_token
-  _cached_token = None
+  _cached_tokens_by_identity.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -387,7 +374,6 @@ def authenticate_with_tpm(
       AuthenticationError: If the challenge-response fails.
       NetworkError: If the server cannot be reached.
   """
-  global _cached_token
 
   # Load credentials if not provided
   if credentials is None:
@@ -501,7 +487,7 @@ def authenticate_with_tpm(
       confirmation_jwk=confirmation_jwk_from_access_token(tokens["access_token"]),
       server_clock_offset_seconds=_server_clock_offset_seconds(tokens["access_token"]),
     )
-    _cached_token = token
+    _remember_token_for_credentials(credentials, token)
     logger.info(
       "TPM authentication successful for %s (handle: %s)",
       identity_id,
@@ -542,7 +528,6 @@ def authenticate_with_piv(
       AuthenticationError: If the challenge-response fails.
       NetworkError: If the server cannot be reached.
   """
-  global _cached_token
 
   if credentials is None:
     credentials = load_credentials()
@@ -649,7 +634,7 @@ def authenticate_with_piv(
       confirmation_jwk=confirmation_jwk_from_access_token(tokens["access_token"]),
       server_clock_offset_seconds=_server_clock_offset_seconds(tokens["access_token"]),
     )
-    _cached_token = token
+    _remember_token_for_credentials(credentials, token)
     logger.info(
       "PIV authentication successful for %s (handle: %s)",
       identity_id,
@@ -690,7 +675,6 @@ def authenticate_with_enclave(
       AuthenticationError: If the challenge-response fails.
       NetworkError: If the server cannot be reached.
   """
-  global _cached_token
 
   if credentials is None:
     credentials = load_credentials()
@@ -792,7 +776,7 @@ def authenticate_with_enclave(
       confirmation_jwk=confirmation_jwk_from_access_token(tokens["access_token"]),
       server_clock_offset_seconds=_server_clock_offset_seconds(tokens["access_token"]),
     )
-    _cached_token = token
+    _remember_token_for_credentials(credentials, token)
     logger.info(
       "Secure Enclave authentication successful for %s (handle: %s)",
       identity_id,

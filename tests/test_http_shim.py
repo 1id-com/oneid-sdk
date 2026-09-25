@@ -66,6 +66,10 @@ class _RecordingRequestHandler(BaseHTTPRequestHandler):
 
   def do_POST(self) -> None:
     if self.path.startswith("/error/"):
+      # Read the request body first: closing a socket with unread data makes
+      # Windows send a TCP reset, which intermittently aborted the client read
+      # (WinError 10053) in test_error_status_is_returned_not_raised.
+      self._read_body()
       status = int(self.path.split("/")[2])
       self._respond(status, json.dumps({"error": {"message": "boom"}}).encode("utf-8"))
     else:

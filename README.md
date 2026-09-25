@@ -47,7 +47,7 @@ identity = oneid.enroll(request_tier="virtual")
 | Tier | Hardware | Sybil Resistant | Trust Level |
 |------|----------|-----------------|-------------|
 | `sovereign` | TPM (Intel, AMD, Infineon) with valid cert | Yes | Highest |
-| `portable` | YubiKey / Nitrokey / Feitian with PIV attestation | Yes | High |
+| `portable` | YubiKey with PIV attestation (other PIV vendors are not yet accepted) | Yes | High |
 | `virtual` | VMware / Hyper-V / QEMU vTPM | No | Verified Hardware |
 | `declared` | None (software keys) | No | Software |
 
@@ -64,6 +64,24 @@ identity = oneid.enroll(request_tier="declared", key_algorithm="ecdsa-p256")  # 
 identity = oneid.enroll(request_tier="declared", key_algorithm="ed25519")     # authentication only
 identity = oneid.enroll(request_tier="declared", key_algorithm="rsa-4096")    # RSA (RS256; signs email)
 ```
+
+## Verifying another agent (peer verification)
+
+```python
+import os, oneid
+
+nonce = os.urandom(32)                          # verifier: a fresh challenge
+bundle = oneid.sign_challenge(nonce)            # prover: enrolled key + Registrar binding
+peer = oneid.verify_peer_identity(nonce, bundle.to_dict())   # verifier
+print(peer.agent_identity_urn, peer.trust_tier, peer.hardware_locked)
+```
+
+The verifier resolves the peer's identity at the AIRS Registry (it must be
+operational), takes the current issuer from there, checks the Registrar
+binding against that issuer's published keys, then checks the nonce signature
+with the bound key. Trust tier and identity facts never come from the bundle.
+This is online by design (a decommissioned identity fails); the Node SDK
+(`verifyPeerIdentity`) is equivalent and bundles are interchangeable.
 
 ## Installation
 

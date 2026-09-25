@@ -44,6 +44,20 @@ pytestmark = pytest.mark.skipif(
   reason="Live server at 1id.com is not reachable"
 )
 
+# Live tests enroll REAL identities at https://1id.com: opt-in only
+# (ONEID_RUN_LIVE_TESTS=1, same rule as the Node suite), and never on the
+# machine's real credential file.
+pytestmark = [
+  pytest.mark.skipif(os.environ.get("ONEID_RUN_LIVE_TESTS") != "1",
+                     reason="live test: set ONEID_RUN_LIVE_TESTS=1 to run it"),
+  pytestmark,
+]
+
+
+@pytest.fixture(autouse=True)
+def never_touch_the_machines_real_identity(isolated_credentials_directory):
+  yield isolated_credentials_directory
+
 
 class TestDeclaredEnrollmentAgainstLiveServer:
   """End-to-end integration tests for declared-tier enrollment."""

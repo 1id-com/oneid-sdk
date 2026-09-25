@@ -17,6 +17,7 @@ There are NO automatic fallbacks. The caller's logic decides what to do.
 from __future__ import annotations
 
 import logging
+import re
 import platform
 from datetime import datetime, timezone
 
@@ -42,6 +43,30 @@ from .identity import (
 from .keys import generate_keypair
 
 logger = logging.getLogger("oneid.enroll")
+
+
+_CANONICAL_AGENT_ID_PATTERN = re.compile(r"id-[a-z]{5}(-[a-z]{5}){3}")
+
+
+def _require_identity_in_successful_enrollment_response(server_response: dict) -> tuple:
+  """AUD-F72: a successful enrollment response must name the identity it
+  created. Returns (identity_data, credentials_data, canonical_id, trust_tier)
+  or raises EnrollmentError -- never persists invented defaults. (client_secret
+  and token_endpoint are legitimately absent: tokens are issued only against a
+  binding proof by the enrolled key, OWN-038.)"""
+  identity_data = server_response.get("identity") if isinstance(server_response, dict) else None
+  if not isinstance(identity_data, dict):
+    raise EnrollmentError("Enrollment response has no identity object; nothing was saved.")
+  canonical_id = identity_data.get("agent_id") or identity_data.get("canonical_id") or ""
+  if not _CANONICAL_AGENT_ID_PATTERN.fullmatch(canonical_id):
+    raise EnrollmentError(f"Enrollment response carries no valid canonical identity id ({canonical_id!r}); nothing was saved.")
+  trust_tier = identity_data.get("trust_tier") or ""
+  if trust_tier not in {tier.value for tier in TrustTier}:
+    raise EnrollmentError(f"Enrollment response carries no valid trust tier ({trust_tier!r}); nothing was saved.")
+  credentials_data = server_response.get("credentials") or {}
+  if not isinstance(credentials_data, dict):
+    raise EnrollmentError("Enrollment response credentials are malformed; nothing was saved.")
+  return identity_data, credentials_data, canonical_id, trust_tier
 
 # -- Tiers that require an HSM and the Go binary --
 TIERS_REQUIRING_HSM = frozenset({
@@ -90,7 +115,7 @@ def enroll(
           If specified, you get exactly that tier or an exception.
           Valid values (RFC Section 3):
           'sovereign' -- requires discrete/firmware TPM
-          'portable'  -- requires YubiKey/Nitrokey/Feitian PIV device
+          'portable'  -- requires a YubiKey with PIV attestation (the only PIV vendor the Registrar accepts today)
           'virtual'   -- requires virtual TPM (VMware/Hyper-V/QEMU)
           'declared'  -- no hardware required (software keys)
 
@@ -175,7 +200,7 @@ def enroll(
   else:
     resolved_key_algorithm = key_algorithm
 
-  return _enroll_at_specific_tier(
+  enrolled_identity = _enroll_at_specific_tier(
     tier=tier,
     display_name=display_name,
     operator_email=operator_email,
@@ -183,6 +208,16 @@ def enroll(
     key_algorithm=resolved_key_algorithm,
     api_base_url=api_base_url,
   )
+  # AUD-F35: an explicitly requested tier is a contract -- exactly that tier or an
+  # exception. The identity exists at the Registrar either way, so its
+  # credentials are kept and the error says what was enrolled.
+  if enrolled_identity.trust_tier != tier:
+    raise EnrollmentError(
+      f"Requested trust tier '{tier.value}' but the Registrar enrolled this device as "
+      f"'{enrolled_identity.trust_tier.value}' (identity {enrolled_identity.canonical_id}; "
+      f"credentials saved). Use it at that tier, or enroll other hardware for '{tier.value}'."
+    )
+  return enrolled_identity
 
 
 def _portable_no_device_help(tier_name: str) -> str:
@@ -352,7 +387,15 @@ def _enroll_declared_tier(
   private_key_pem = private_key_pem_bytes.decode("utf-8")
   public_key_pem = public_key_pem_bytes.decode("utf-8")
 
-  # Step 2: Send enrollment request to server
+  # Step 2: Prove possession of the new key (registry-04 Declared Tier; AUD-F67)
+  # and send the enrollment request.
+  import base64 as _base64
+  import time as _time
+  from .keys import build_declared_enrollment_proof_of_possession_statement, sign_challenge_with_private_key
+  proof_of_possession_signed_at_unix = int(_time.time())
+  proof_of_possession_signature_b64 = _base64.b64encode(sign_challenge_with_private_key(
+    private_key_pem, build_declared_enrollment_proof_of_possession_statement(
+      public_key_pem, proof_of_possession_signed_at_unix))).decode("ascii")
   api_client = OneIDAPIClient(api_base_url=api_base_url)
   server_response = api_client.enroll_declared(
     software_key_pem=public_key_pem,
@@ -360,13 +403,13 @@ def _enroll_declared_tier(
     operator_email=operator_email,
     requested_handle=requested_handle,
     display_name=display_name,
+    proof_of_possession_signature_b64=proof_of_possession_signature_b64,
+    proof_of_possession_signed_at_unix=proof_of_possession_signed_at_unix,
   )
 
   # Step 3: Parse server response
-  identity_data = server_response.get("identity", {})
-  credentials_data = server_response.get("credentials", {})
-
-  canonical_id = identity_data.get("agent_id", identity_data.get("canonical_id", ""))
+  identity_data, credentials_data, canonical_id, validated_trust_tier = (
+    _require_identity_in_successful_enrollment_response(server_response))
   agent_identity_urn = identity_data.get("agent_identity_urn", "")
   handle = identity_data.get("handle", f"@{canonical_id}")
   enrolled_at_str = identity_data.get("registered_at", datetime.now(timezone.utc).isoformat())
@@ -377,7 +420,7 @@ def _enroll_declared_tier(
     client_secret=credentials_data.get("client_secret", ""),
     token_endpoint=credentials_data.get("token_endpoint", f"{api_base_url}/realms/agents/protocol/openid-connect/token"),
     api_base_url=api_base_url,
-    trust_tier=TrustTier.DECLARED.value,
+    trust_tier=validated_trust_tier,
     key_algorithm=key_algorithm.value,
     private_key_pem=private_key_pem,
     enrolled_at=enrolled_at_str,
@@ -395,8 +438,7 @@ def _enroll_declared_tier(
     logger.info("Handle status: %s", handle_info.get("status"))
     if handle_info.get("status") == "available":
       logger.info("Handle %s is available for $%.2f/year", handle_info.get("handle"), handle_info.get("annual_fee_usd", 0))
-      logger.info("To claim this handle, use: oneid.handle.purchase('%s') or oneid.handle.request('%s', operator_email='...')", handle_info.get("handle", "").lstrip("@"), handle_info.get("handle", "").lstrip("@"))
-      logger.info("Or visit: https://1id.com/handle/purchase?name=%s", handle_info.get("handle", "").lstrip("@"))
+      logger.info("To claim this handle, visit: https://1id.com/handle/purchase?name=%s", handle_info.get("handle", "").lstrip("@"))
     elif handle_info.get("status") == "reserved":
       logger.warning("Handle %s is reserved: %s", handle_info.get("handle"), handle_info.get("message"))
 
@@ -409,7 +451,7 @@ def _enroll_declared_tier(
   return Identity(
     canonical_id=canonical_id,
     handle=handle,
-    trust_tier=TrustTier.DECLARED,
+    trust_tier=TrustTier(validated_trust_tier),
     hsm_type=HSMType.SOFTWARE,
     hsm_manufacturer=None,
     enrolled_at=enrolled_at,
@@ -427,7 +469,7 @@ def _enroll_piv_tier(
   display_name: str | None,
   api_base_url: str,
 ) -> Identity:
-  """Enroll at the portable tier using a PIV device (YubiKey/Nitrokey/Feitian).
+  """Enroll at the portable tier using a YubiKey (PIV attestation; the only PIV vendor the Registrar accepts today).
 
   This uses the Go binary (oneid-enroll) to:
   1. Detect available HSMs and select a PIV device
@@ -485,6 +527,7 @@ def _enroll_piv_tier(
       hsm_type=selected_hsm.get("type", "yubikey"),
       operator_email=operator_email,
       requested_handle=requested_handle,
+      display_name=display_name,  # OWN-029: was dropped for PIV enrollment
     )
   except AlreadyEnrolledError:
     logger.info(
@@ -521,13 +564,11 @@ def _enroll_piv_tier(
       decrypted_credential=signed_nonce_b64,
     )
 
-  identity_data = activate_response.get("identity", {})
-  credentials_data = activate_response.get("credentials", {})
-
-  canonical_id = identity_data.get("agent_id", identity_data.get("canonical_id", ""))
+  identity_data, credentials_data, canonical_id, validated_trust_tier = (
+    _require_identity_in_successful_enrollment_response(activate_response))
   agent_identity_urn = identity_data.get("agent_identity_urn", "")
   handle = identity_data.get("handle", f"@{canonical_id}")
-  trust_tier_str = identity_data.get("trust_tier", request_tier.value)
+  trust_tier_str = validated_trust_tier
   enrolled_at_str = identity_data.get("registered_at", datetime.now(timezone.utc).isoformat())
 
   stored_credentials = StoredCredentials(
@@ -552,8 +593,7 @@ def _enroll_piv_tier(
     logger.info("Handle status: %s", handle_info.get("status"))
     if handle_info.get("status") == "available":
       logger.info("Handle %s is available for $%.2f/year", handle_info.get("handle"), handle_info.get("annual_fee_usd", 0))
-      logger.info("To claim this handle, use: oneid.handle.purchase('%s') or oneid.handle.request('%s', operator_email='...')", handle_info.get("handle", "").lstrip("@"), handle_info.get("handle", "").lstrip("@"))
-      logger.info("Or visit: https://1id.com/handle/purchase?name=%s", handle_info.get("handle", "").lstrip("@"))
+      logger.info("To claim this handle, visit: https://1id.com/handle/purchase?name=%s", handle_info.get("handle", "").lstrip("@"))
     elif handle_info.get("status") == "reserved":
       logger.warning("Handle %s is reserved: %s", handle_info.get("handle"), handle_info.get("message"))
 
@@ -699,11 +739,16 @@ def _enroll_enclave_tier(
   """
   from .helper import (
     detect_available_hsms,
+    ensure_secure_enclave_helper_available,
     extract_attestation_data,
     sign_challenge_with_enclave,
   )
 
   logger.info("Enrolling at enclave tier (Apple Secure Enclave required)")
+
+  # OWN-030: oneid-enroll delegates to oneid-se-helper next to it; fetch the
+  # verified helper into the cache now instead of requiring a manual copy.
+  ensure_secure_enclave_helper_available()
 
   detected_hsms = detect_available_hsms() or []
 
@@ -746,13 +791,11 @@ def _enroll_enclave_tier(
     decrypted_credential=signed_nonce_b64,
   )
 
-  identity_data = activate_response.get("identity", {})
-  credentials_data = activate_response.get("credentials", {})
-
-  canonical_id = identity_data.get("agent_id", identity_data.get("canonical_id", ""))
+  identity_data, credentials_data, canonical_id, validated_trust_tier = (
+    _require_identity_in_successful_enrollment_response(activate_response))
   agent_identity_urn = identity_data.get("agent_identity_urn", "")
   handle = identity_data.get("handle", f"@{canonical_id}")
-  trust_tier_str = identity_data.get("trust_tier", "enclave")
+  trust_tier_str = validated_trust_tier
   enrolled_at_str = identity_data.get("registered_at", datetime.now(timezone.utc).isoformat())
 
   enclave_key_blob_b64 = _read_enclave_key_data_representation_from_disk()
@@ -794,7 +837,7 @@ def _enroll_enclave_tier(
   return Identity(
     canonical_id=canonical_id,
     handle=handle,
-    trust_tier=TrustTier.ENCLAVE,
+    trust_tier=TrustTier(validated_trust_tier),
     hsm_type=HSMType.SECURE_ENCLAVE,
     hsm_manufacturer="AAPL",
     enrolled_at=enrolled_at,
@@ -881,6 +924,7 @@ def _enroll_hsm_tier(
       hsm_type=selected_hsm.get("type", "tpm"),
       operator_email=operator_email,
       requested_handle=requested_handle,
+      display_name=display_name,  # OWN-029: was dropped for TPM enrollment
     )
   except AlreadyEnrolledError:
     logger.info("This TPM is already enrolled -- re-authenticating with a TPM signature (no elevation)")
@@ -953,7 +997,7 @@ def _build_identity_from_activate_response(
   canonical_id = identity_data.get("agent_id", identity_data.get("canonical_id", ""))
   agent_identity_urn = identity_data.get("agent_identity_urn", "")
   handle = identity_data.get("handle", f"@{canonical_id}")
-  trust_tier_str = identity_data.get("trust_tier", request_tier.value)
+  trust_tier_str = validated_trust_tier
   enrolled_at_str = identity_data.get("registered_at", datetime.now(timezone.utc).isoformat())
 
   stored_credentials = StoredCredentials(
@@ -977,8 +1021,7 @@ def _build_identity_from_activate_response(
     logger.info("Handle status: %s", handle_info.get("status"))
     if handle_info.get("status") == "available":
       logger.info("Handle %s is available for $%.2f/year", handle_info.get("handle"), handle_info.get("annual_fee_usd", 0))
-      logger.info("To claim this handle, use: oneid.handle.purchase('%s') or oneid.handle.request('%s', operator_email='...')", handle_info.get("handle", "").lstrip("@"), handle_info.get("handle", "").lstrip("@"))
-      logger.info("Or visit: https://1id.com/handle/purchase?name=%s", handle_info.get("handle", "").lstrip("@"))
+      logger.info("To claim this handle, visit: https://1id.com/handle/purchase?name=%s", handle_info.get("handle", "").lstrip("@"))
     elif handle_info.get("status") == "reserved":
       logger.warning("Handle %s is reserved: %s", handle_info.get("handle"), handle_info.get("message"))
 
@@ -1029,7 +1072,7 @@ def _select_hsm_for_tier(
   """
   tier_to_hsm_type_preferences: dict[TrustTier, list[str]] = {
     TrustTier.SOVEREIGN: ["tpm"],
-    TrustTier.PORTABLE: ["yubikey", "nitrokey", "feitian", "solokeys"],
+    TrustTier.PORTABLE: ["yubikey"],
     TrustTier.VIRTUAL: ["tpm"],
   }
 

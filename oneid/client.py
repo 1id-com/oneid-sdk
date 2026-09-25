@@ -134,6 +134,8 @@ class OneIDAPIClient:
     operator_email: str | None = None,
     requested_handle: str | None = None,
     display_name: str | None = None,
+    proof_of_possession_signature_b64: str | None = None,
+    proof_of_possession_signed_at_unix: int | None = None,
   ) -> dict[str, Any]:
     """Enroll a new identity at the declared trust tier (no HSM required).
 
@@ -164,6 +166,9 @@ class OneIDAPIClient:
       request_body["requested_handle"] = requested_handle
     if display_name is not None:
       request_body["display_name"] = display_name
+    if proof_of_possession_signature_b64 is not None:
+      request_body["proof_of_possession_signature_b64"] = proof_of_possession_signature_b64
+      request_body["proof_of_possession_signed_at_unix"] = proof_of_possession_signed_at_unix
 
     return self._make_request("POST", "/api/v1/enroll/declared", json_body=request_body)
 

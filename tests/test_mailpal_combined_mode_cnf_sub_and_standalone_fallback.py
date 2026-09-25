@@ -112,7 +112,8 @@ def test_failed_mode1_replaces_the_cnf_bearing_mode2_with_a_standalone_one(
   mock_prepare_mode1.side_effect = RuntimeError("TPM unavailable")
 
   from oneid.mailpal import send
-  result = send(to=["r@example.com"], subject="Combined", text_body="Body", attestation_mode="both", deliver=False)
+  result = send(to=["r@example.com"], subject="Combined", text_body="Body", attestation_mode="both", deliver=False,
+                require_requested_attestation=False)
 
   first_call, second_call = mock_prepare_mode2.call_args_list
   assert first_call.kwargs["cnf_jwk"] is not None
@@ -120,6 +121,25 @@ def test_failed_mode1_replaces_the_cnf_bearing_mode2_with_a_standalone_one(
   assert b"standalone.sd.jwt" in result.rfc5322_message_bytes
   assert b"combined.sd.jwt" not in result.rfc5322_message_bytes
   assert b"Hardware-Attestation:" not in result.rfc5322_message_bytes
+
+
+@patch("oneid.mailpal.get_token")
+@patch("oneid.attestation._fetch_binding_jws")
+@patch("oneid.attestation.prepare_direct_hardware_attestation")
+@patch("oneid.mailpal.prepare_attestation")
+@patch("oneid.mailpal.load_credentials")
+def test_failed_mode1_refuses_to_send_by_default(
+  mock_load_credentials, mock_prepare_mode2, mock_prepare_mode1, mock_fetch_binding, mock_get_token,
+):
+  """AUD-F28: the caller asked for both proofs; without Mode 1 nothing is sent."""
+  mock_load_credentials.return_value = _credentials_with_certificate_chain(None)
+  mock_prepare_mode2.side_effect = [_mode2_proof("combined.sd.jwt"), _mode2_proof("standalone.sd.jwt")]
+  mock_prepare_mode1.side_effect = RuntimeError("TPM unavailable")
+
+  from oneid.exceptions import AttestationGenerationError
+  from oneid.mailpal import send
+  with pytest.raises(AttestationGenerationError, match=r"Mode 1 \(Hardware-Attestation\) failed: TPM unavailable"):
+    send(to=["r@example.com"], subject="Combined", text_body="Body", attestation_mode="both", deliver=False)
 
 
 @patch("oneid.attestation.get_token")

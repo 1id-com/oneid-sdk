@@ -530,24 +530,24 @@ def prepare_direct_hardware_attestation(
   # The algorithm, typ parameter, and cert chain all adapt accordingly.
   effective_signing_device_type = override_signing_device_type
   if not effective_signing_device_type:
-    # Default: derive from trust tier / credentials (pre-Phase-3 behavior)
-    if trust_tier == "portable":
-      effective_signing_device_type = "piv"
-    elif trust_tier == "enclave":
-      effective_signing_device_type = "enclave"
-    elif trust_tier in ("sovereign", "virtual") or creds.key_algorithm == "tpm-ak":
-      effective_signing_device_type = "tpm"
-    elif creds.private_key_pem:
-      effective_signing_device_type = "software"
+    # Default: the enrolled local device signs (hsm_key_reference first, the
+    # trust tier only as fallback) -- the same rule as login (AUD-F66).
+    from .credentials import local_signing_device_type_for_credentials
+    effective_signing_device_type = local_signing_device_type_for_credentials(creds)
 
   if effective_signing_device_type == "piv":
     algorithm_for_header = "ES256"
     typ_parameter = _TRUST_TIER_TO_RFC_TYP_PARAMETER.get("portable", "PIV")
   elif effective_signing_device_type == "enclave":
     algorithm_for_header = "ES256"
+    typ_parameter = _TRUST_TIER_TO_RFC_TYP_PARAMETER.get("enclave", "ENC")
   elif effective_signing_device_type == "tpm":
     algorithm_for_header = "RS256"
+    # A TPM is sovereign or virtual; the identity tier tells which (a TPM added
+    # to a portable/declared identity is reported as TPM).
+    typ_parameter = _TRUST_TIER_TO_RFC_TYP_PARAMETER.get(trust_tier, "TPM") if trust_tier in ("sovereign", "virtual") else "TPM"
   elif effective_signing_device_type == "software" and creds.private_key_pem:
+    typ_parameter = "SFT"
     algo_name = _determine_signing_algorithm_name(creds)
     algorithm_for_header = algo_name
     if algorithm_for_header not in _RFC_ALG_TO_DER_SIGNATURE_ALGORITHM_IDENTIFIER:

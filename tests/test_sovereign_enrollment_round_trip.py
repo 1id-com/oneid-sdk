@@ -123,6 +123,8 @@ def _api_request(method, path, json_body=None):
   return body.get("data", {})
 
 
+# Live hardware + live server: opt-in only (ONEID_RUN_LIVE_TESTS=1), never on a plain run.
+@unittest.skipUnless(os.environ.get("ONEID_RUN_LIVE_TESTS") == "1", "live TPM + live server test: set ONEID_RUN_LIVE_TESTS=1 to run it")
 @unittest.skipUnless(_server_is_reachable(), "1id.com server not reachable")
 @unittest.skipUnless(_find_binary(), "oneid-enroll binary not found")
 class TestSovereignEnrollmentRoundTrip(unittest.TestCase):

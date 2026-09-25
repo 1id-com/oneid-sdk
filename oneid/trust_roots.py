@@ -1,9 +1,11 @@
 """
 1id Trust Root Certificate Cache
 
-Manages the local cache of 1ID CA root certificates used for offline
-peer identity verification. The verifier never needs to contact 1ID
-during verification -- only to refresh the root cache.
+Manages the local cache of the 1ID Registrar's CA root certificates (the
+roots of the per-device identity certificates 1ID issues), for callers that
+validate those certificate chains themselves. Peer identity verification no
+longer uses them: since 3.1.2 it follows the AIRS authority model (Registry
+resolution -> current issuer -> Registrar binding; see verify.py).
 
 Cache lifecycle:
   1. First call to get_trust_roots() auto-fetches from /api/v1/trust/roots
@@ -12,8 +14,9 @@ Cache lifecycle:
   4. refresh_trust_roots() explicitly refetches and updates the cache
   5. Cache has no expiry -- roots are long-lived (30+ years)
 
-The SDK also ships with embedded root fingerprints for bootstrap
-validation (ensures the fetched roots haven't been MITM'd).
+The roots are fetched over HTTPS from the API (server authenticated by
+TLS); the SDK ships no embedded pins (AUD-F33: an earlier docstring claimed
+it did).
 """
 from __future__ import annotations
 

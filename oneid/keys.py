@@ -105,6 +105,20 @@ def load_private_key_from_pem(private_key_pem: str | bytes) -> PrivateKeyTypes:
   return serialization.load_pem_private_key(private_key_pem, password=None)
 
 
+DECLARED_ENROLLMENT_PROOF_OF_POSSESSION_STATEMENT_PREFIX = "1id-declared-enrollment-proof-of-possession:v1:"
+
+
+def build_declared_enrollment_proof_of_possession_statement(public_key_pem: str, signed_at_unix: int) -> bytes:
+  """The statement a declared enrollment signs with the key it enrolls (AUD-F67;
+  same format as the server and the Node SDK): prefix + SHA-256 hex of the SPKI
+  DER + ":" + unix seconds."""
+  import hashlib
+  from cryptography.hazmat.primitives import serialization as _serialization
+  public_key = _serialization.load_pem_public_key(public_key_pem.encode("utf-8"))
+  spki_der = public_key.public_bytes(_serialization.Encoding.DER, _serialization.PublicFormat.SubjectPublicKeyInfo)
+  return f"{DECLARED_ENROLLMENT_PROOF_OF_POSSESSION_STATEMENT_PREFIX}{hashlib.sha256(spki_der).hexdigest()}:{int(signed_at_unix)}".encode("ascii")
+
+
 def sign_challenge_with_private_key(
   private_key_pem: str | bytes,
   challenge_bytes: bytes,

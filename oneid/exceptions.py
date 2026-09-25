@@ -187,6 +187,14 @@ class HardwareDeviceNotPresentError(AuthenticationError):
     self.error_code = "HARDWARE_DEVICE_NOT_PRESENT"
 
 
+class AttestationGenerationError(OneIDError):
+  """A requested email attestation (Mode 1 Hardware-Attestation and/or Mode 2
+  Hardware-Trust-Proof) could not be produced, so the message was NOT sent
+  (AUD-F28: never silently send without the proof the caller asked for).
+  Pass require_requested_attestation=False to mailpal.send() for best effort.
+  """
+
+
 class NetworkError(OneIDError):
   """Could not reach the 1id.com API server.
 

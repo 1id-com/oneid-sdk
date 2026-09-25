@@ -140,6 +140,62 @@ def find_binary() -> Path | None:
   return None
 
 
+# Publisher identity of the release binaries (AUD-F07). Windows: the Authenticode
+# signer certificate's organisation; macOS: the Apple Developer ID team.
+EXPECTED_WINDOWS_AUTHENTICODE_SIGNER_ORGANIZATION = "O=Aura Friday"
+EXPECTED_APPLE_DEVELOPER_ID_TEAM_IDENTIFIER = "XQYBH3CT45"
+
+
+def _verify_publisher_code_signature_of_downloaded_release_asset(asset_path: Path, asset_name: str) -> None:
+  """Require a valid publisher code signature on a downloaded helper (Windows:
+  Authenticode by EXPECTED_WINDOWS_AUTHENTICODE_SIGNER_ORGANIZATION; macOS:
+  Developer ID of EXPECTED_APPLE_DEVELOPER_ID_TEAM_IDENTIFIER). Linux binaries
+  are not code-signed; their SHA-256 check is the only one. Needs no elevation.
+
+  Raises:
+      BinaryNotFoundError: the signature is missing, invalid, or not ours.
+  """
+  system_name = platform.system()
+  if system_name == "Windows":
+    powershell_script = (
+      "$s = Get-AuthenticodeSignature -LiteralPath $env:ONEID_HELPER_TO_VERIFY; "
+      "$s.Status.ToString() + '|' + $(if ($s.SignerCertificate) { $s.SignerCertificate.Subject } else { '' })"
+    )
+    try:
+      completed = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", powershell_script],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "ONEID_HELPER_TO_VERIFY": str(asset_path)},
+      )
+    except (OSError, subprocess.TimeoutExpired) as powershell_error:
+      raise BinaryNotFoundError(
+        f"Could not check the Authenticode signature of {asset_name}: {powershell_error}"
+      ) from powershell_error
+    status_text, _, signer_subject = completed.stdout.strip().partition("|")
+    if status_text != "Valid" or EXPECTED_WINDOWS_AUTHENTICODE_SIGNER_ORGANIZATION not in signer_subject:
+      raise BinaryNotFoundError(
+        f"{asset_name} is not validly signed by {EXPECTED_WINDOWS_AUTHENTICODE_SIGNER_ORGANIZATION} "
+        f"(Authenticode status {status_text or 'unknown'}, signer '{signer_subject}'); refusing to install it."
+      )
+    logger.info("Authenticode signature verified for %s (%s)", asset_name, signer_subject)
+  elif system_name == "Darwin":
+    verify_run = subprocess.run(["codesign", "--verify", "--strict", str(asset_path)],
+                                capture_output=True, text=True, timeout=60)
+    describe_run = subprocess.run(["codesign", "-dv", "--verbose=2", str(asset_path)],
+                                  capture_output=True, text=True, timeout=60)
+    team_line = f"TeamIdentifier={EXPECTED_APPLE_DEVELOPER_ID_TEAM_IDENTIFIER}"
+    if verify_run.returncode != 0 or team_line not in (describe_run.stdout + describe_run.stderr):
+      raise BinaryNotFoundError(
+        f"{asset_name} is not validly signed by Apple Developer ID team "
+        f"{EXPECTED_APPLE_DEVELOPER_ID_TEAM_IDENTIFIER}; refusing to install it. "
+        f"{verify_run.stderr.strip()[:200]}"
+      )
+    logger.info("Developer ID signature verified for %s (team %s)", asset_name,
+                EXPECTED_APPLE_DEVELOPER_ID_TEAM_IDENTIFIER)
+  else:
+    logger.info("%s: no platform code signature on Linux; SHA-256 verified only", asset_name)
+
+
 def _download_binary_from_github_release(binary_name: str, destination_path: Path) -> Path:
   """Download the oneid-enroll binary from the GitHub 'latest' release.
 
@@ -217,11 +273,15 @@ def _download_binary_from_github_release(binary_name: str, destination_path: Pat
       logger.info("SHA-256 checksum verified: %s", actual_sha256_hash)
 
     except urllib.error.URLError as checksum_error:
-      logger.warning(
-        "Could not download checksum file (%s). "
-        "Proceeding without verification -- binary is NOT integrity-checked.",
-        checksum_error,
-      )
+      # AUD-F07: never install a helper whose integrity could not be checked.
+      raise BinaryNotFoundError(
+        f"Could not download the checksum for {binary_name} ({checksum_error}); "
+        f"refusing to install an unverified helper."
+      ) from checksum_error
+
+    # Step 2b: the checksum comes from the same release as the binary, so also
+    # require the publisher's code signature where the platform has one.
+    _verify_publisher_code_signature_of_downloaded_release_asset(temp_file_path, binary_name)
 
     # Step 3: Move temp file to final destination
     # On Windows, we may need to remove the destination first
@@ -465,11 +525,10 @@ def detect_available_signing_capability_tiers() -> dict:
     Supports --serial/--reader for multi-YubiKey targeting (v1.3.0+).
     Best choice when available.
 
-  Tier B -- Native Python extensions (pyscard for PIV, tpm2-pytss for TPM):
-    Pure-Python signing without spawning a subprocess. Requires platform-
-    specific native packages to be installed. Currently supports PIV only
-    (pyscard). TPM Tier B (tpm2-pytss or ctypes tbs.dll) is not yet
-    implemented.
+  Tier B -- Native Python PC/SC for PIV (optional pyscard): multi-YubiKey
+    enumeration, serial selection and PIV signing without a subprocess.
+    PIV only; TPM and Secure Enclave always use Tier A (the helper). Same
+    as the Node SDK (optional 'smartcard' package).
 
   Tier C -- Software-only:
     No hardware signing. Only software key operations are possible.
@@ -482,7 +541,6 @@ def detect_available_signing_capability_tiers() -> dict:
         - tier_a_go_binary_version: str or None
         - tier_a_go_binary_path: str or None
         - tier_b_piv_via_pyscard_is_available: bool
-        - tier_b_tpm_via_native_is_available: bool
         - tier_b_piv_connected_yubikey_count: int (0 if pyscard unavailable)
         - tier_c_software_only_is_available: bool (always True)
         - recommended_piv_tier: "A" | "B" | "C"
@@ -493,7 +551,6 @@ def detect_available_signing_capability_tiers() -> dict:
     "tier_a_go_binary_version": None,
     "tier_a_go_binary_path": None,
     "tier_b_piv_via_pyscard_is_available": False,
-    "tier_b_tpm_via_native_is_available": False,
     "tier_b_piv_connected_yubikey_count": 0,
     "tier_c_software_only_is_available": True,
     "recommended_piv_tier": "C",
@@ -530,26 +587,6 @@ def detect_available_signing_capability_tiers() -> dict:
     logger.debug("Tier B PIV: pyscard not installed")
   except Exception as pyscard_probe_err:
     logger.debug("Tier B PIV probe failed: %s", pyscard_probe_err)
-
-  # Tier B TPM: native check (tpm2-pytss on Linux, ctypes tbs.dll on Windows)
-  if platform.system() == "Windows":
-    try:
-      import ctypes
-      tbs_dll_handle = ctypes.windll.LoadLibrary("tbs.dll")
-      if tbs_dll_handle is not None:
-        result["tier_b_tpm_via_native_is_available"] = True
-        if not result["tier_a_go_binary_is_available"]:
-          result["recommended_tpm_tier"] = "B"
-    except Exception:
-      logger.debug("Tier B TPM: tbs.dll not loadable")
-  else:
-    try:
-      import tpm2_pytss  # noqa: F401
-      result["tier_b_tpm_via_native_is_available"] = True
-      if not result["tier_a_go_binary_is_available"]:
-        result["recommended_tpm_tier"] = "B"
-    except ImportError:
-      logger.debug("Tier B TPM: tpm2-pytss not installed")
 
   return result
 
@@ -1106,12 +1143,37 @@ def _find_secure_enclave_helper_binary() -> Path | None:
     if sibling_path.exists() and os.access(str(sibling_path), os.X_OK):
       return sibling_path
 
+  home_oneid_path = Path.home() / ".oneid" / "bin" / se_helper_name
+  if home_oneid_path.exists() and os.access(str(home_oneid_path), os.X_OK):
+    return home_oneid_path
+
   import shutil
   path_binary = shutil.which(se_helper_name)
   if path_binary:
     return Path(path_binary)
 
   return None
+
+
+def ensure_secure_enclave_helper_available() -> Path:
+  """Find oneid-se-helper, or download it from the oneid-enroll GitHub release
+  into the helper cache (OWN-030: previously it had to be placed by hand).
+  The download is SHA-256- and Developer-ID-verified like oneid-enroll. macOS only.
+
+  Raises:
+      NoHSMError: not macOS.
+      BinaryNotFoundError: not found and the verified download failed.
+  """
+  if platform.system() != "Darwin":
+    raise NoHSMError("The Secure Enclave helper exists only on macOS")
+  existing_helper = _find_secure_enclave_helper_binary()
+  if existing_helper is not None:
+    return existing_helper
+  machine_name = platform.machine().lower()
+  release_asset_name = "oneid-se-helper-arm64" if machine_name in ("arm64", "aarch64") else "oneid-se-helper"
+  destination = _get_binary_cache_directory() / "oneid-se-helper"
+  logger.info("oneid-se-helper not found; downloading %s from the GitHub release", release_asset_name)
+  return _download_binary_from_github_release(release_asset_name, destination)
 
 
 _ENCLAVE_DEFAULT_KEY_TAG = "com.1id.enclave.default"
@@ -1264,12 +1326,12 @@ def sign_challenge_with_enclave(nonce_b64: str) -> dict:
       NoHSMError: If Secure Enclave is not available.
       HSMAccessError: If signing fails.
   """
-  se_helper_path = _find_secure_enclave_helper_binary()
-  if se_helper_path is None:
+  try:
+    se_helper_path = ensure_secure_enclave_helper_available()
+  except BinaryNotFoundError as se_helper_download_error:
     raise NoHSMError(
-      "oneid-se-helper binary not found. "
-      "It should be in ~/.oneid/bin/ alongside oneid-enroll."
-    )
+      f"oneid-se-helper binary not found and could not be downloaded: {se_helper_download_error}"
+    ) from se_helper_download_error
 
   return _run_secure_enclave_helper_with_recovery(
     se_helper_path,

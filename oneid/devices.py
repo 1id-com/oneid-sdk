@@ -1102,3 +1102,29 @@ def lock_hardware(
     trust_tier=lock_data.get("trust_tier", ""),
     active_device_count=lock_data.get("active_device_count", 1),
   )
+
+
+# =====================================================================
+# register_operator_email()
+# =====================================================================
+
+def register_operator_email(
+  operator_email_address: str,
+  credentials: StoredCredentials | None = None,
+) -> bool:
+  """Register or update the human operator email for this identity
+  (PUT /api/v1/identity/operator-email, sender-constrained). Same as the
+  Node SDK's registerOperatorEmail().
+
+  Returns:
+    True if the server registered the email.
+  """
+  response_data = _make_authenticated_request(
+    "PUT",
+    "/api/v1/identity/operator-email",
+    json_body={"operator_email": operator_email_address},
+    credentials=credentials,
+  )
+  from .world import invalidate_world_cache
+  invalidate_world_cache()
+  return bool(response_data.get("operator_email_registered"))

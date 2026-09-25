@@ -26,6 +26,11 @@ from oneid.exceptions import (
 )
 from oneid.identity import KeyAlgorithm, TrustTier
 
+# oneid.enroll is also the name of the exported enroll() function, so string
+# patch targets resolve to the function on Python 3.8; patch the module object.
+import importlib as _importlib
+ENROLL_MODULE = _importlib.import_module("oneid.enroll")
+
 
 class TestDeclaredTierEnrollment:
   """Test the declared-tier enrollment flow (no HSM, software keys)."""
@@ -36,7 +41,7 @@ class TestDeclaredTierEnrollment:
     """Happy path: declared enrollment should return a valid Identity."""
     mock_response_data = mock_server_declared_enrollment_response["data"]
 
-    with patch("oneid.enroll.OneIDAPIClient") as MockClient:
+    with patch.object(ENROLL_MODULE, "OneIDAPIClient") as MockClient:
       mock_instance = MockClient.return_value
       mock_instance.enroll_declared.return_value = mock_response_data
 
@@ -53,7 +58,7 @@ class TestDeclaredTierEnrollment:
     """After enrollment, credentials should be loadable from disk."""
     mock_response_data = mock_server_declared_enrollment_response["data"]
 
-    with patch("oneid.enroll.OneIDAPIClient") as MockClient:
+    with patch.object(ENROLL_MODULE, "OneIDAPIClient") as MockClient:
       mock_instance = MockClient.return_value
       mock_instance.enroll_declared.return_value = mock_response_data
 
@@ -73,7 +78,7 @@ class TestDeclaredTierEnrollment:
     """The public key (not private) should be sent to the server."""
     mock_response_data = mock_server_declared_enrollment_response["data"]
 
-    with patch("oneid.enroll.OneIDAPIClient") as MockClient:
+    with patch.object(ENROLL_MODULE, "OneIDAPIClient") as MockClient:
       mock_instance = MockClient.return_value
       mock_instance.enroll_declared.return_value = mock_response_data
 
@@ -91,7 +96,7 @@ class TestDeclaredTierEnrollment:
     """Agent should be able to choose RSA-4096 instead of Ed25519."""
     mock_response_data = mock_server_declared_enrollment_response["data"]
 
-    with patch("oneid.enroll.OneIDAPIClient") as MockClient:
+    with patch.object(ENROLL_MODULE, "OneIDAPIClient") as MockClient:
       mock_instance = MockClient.return_value
       mock_instance.enroll_declared.return_value = mock_response_data
 
@@ -110,7 +115,7 @@ class TestDeclaredTierEnrollment:
     """Optional handle should be forwarded to the server."""
     mock_response_data = mock_server_declared_enrollment_response["data"]
 
-    with patch("oneid.enroll.OneIDAPIClient") as MockClient:
+    with patch.object(ENROLL_MODULE, "OneIDAPIClient") as MockClient:
       mock_instance = MockClient.return_value
       mock_instance.enroll_declared.return_value = mock_response_data
 
@@ -125,7 +130,7 @@ class TestDeclaredTierEnrollment:
     """Optional operator email should be forwarded to the server."""
     mock_response_data = mock_server_declared_enrollment_response["data"]
 
-    with patch("oneid.enroll.OneIDAPIClient") as MockClient:
+    with patch.object(ENROLL_MODULE, "OneIDAPIClient") as MockClient:
       mock_instance = MockClient.return_value
       mock_instance.enroll_declared.return_value = mock_response_data
 
@@ -149,7 +154,7 @@ class TestRequestTierValidation:
 
   def test_sovereign_without_hsm_raises_no_hsm_error(self, isolated_credentials_directory):
     """Requesting sovereign without an HSM must raise NoHSMError, NOT fall back."""
-    with patch("oneid.enroll._enroll_hsm_tier") as mock_hsm_enroll:
+    with patch.object(ENROLL_MODULE, "_enroll_hsm_tier") as mock_hsm_enroll:
       mock_hsm_enroll.side_effect = NoHSMError("No TPM found")
 
       with pytest.raises(NoHSMError):
@@ -165,7 +170,7 @@ class TestServerErrorHandling:
 
   def test_handle_taken_error_from_server(self, isolated_credentials_directory):
     """Server returning HANDLE_TAKEN should raise HandleTakenError."""
-    with patch("oneid.enroll.OneIDAPIClient") as MockClient:
+    with patch.object(ENROLL_MODULE, "OneIDAPIClient") as MockClient:
       mock_instance = MockClient.return_value
       mock_instance.enroll_declared.side_effect = HandleTakenError("Handle 'clawdia' is taken")
 
@@ -174,7 +179,7 @@ class TestServerErrorHandling:
 
   def test_network_error_propagates(self, isolated_credentials_directory):
     """Network errors should propagate as NetworkError."""
-    with patch("oneid.enroll.OneIDAPIClient") as MockClient:
+    with patch.object(ENROLL_MODULE, "OneIDAPIClient") as MockClient:
       mock_instance = MockClient.return_value
       mock_instance.enroll_declared.side_effect = NetworkError("Connection refused")
 
@@ -191,7 +196,7 @@ class TestNoFallbackRule:
   def test_sovereign_never_falls_back_to_declared(self, isolated_credentials_directory):
     """If sovereign fails, the caller should get an exception, never declared tier."""
     # Mock the HSM enrollment to raise NoHSMError
-    with patch("oneid.enroll._enroll_hsm_tier") as mock_hsm:
+    with patch.object(ENROLL_MODULE, "_enroll_hsm_tier") as mock_hsm:
       mock_hsm.side_effect = NoHSMError("No TPM")
 
       with pytest.raises(NoHSMError):
@@ -203,7 +208,7 @@ class TestNoFallbackRule:
 
   def test_portable_never_falls_back_to_declared(self, isolated_credentials_directory):
     """If portable tier fails, no fallback."""
-    with patch("oneid.enroll._enroll_piv_tier") as mock_piv:
+    with patch.object(ENROLL_MODULE, "_enroll_piv_tier") as mock_piv:
       mock_piv.side_effect = NoHSMError("No YubiKey")
 
       with pytest.raises(NoHSMError):

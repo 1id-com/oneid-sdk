@@ -27,7 +27,7 @@ If you need a specific tier:
 
 Trust tiers (highest to lowest, RFC Section 3):
     'sovereign' -- Discrete/firmware TPM, manufacturer CA chain, Sybil-resistant
-    'portable'  -- YubiKey/Nitrokey/Feitian PIV, manufacturer-attested, portable
+    'portable'  -- YubiKey PIV (Yubico attestation), manufacturer-attested, portable
     'virtual'   -- Hypervisor vTPM (VMware/Hyper-V/QEMU), hypervisor-attested
     'declared'  -- Software keys, no hardware proof, always works
 """
@@ -45,6 +45,7 @@ from .exceptions import (
   HandleTakenError,
   HardwareDeviceNotPresentError,
   HSMAccessError,
+  AttestationGenerationError,
   NetworkError,
   NoHSMError,
   NotEnrolledError,
@@ -77,6 +78,9 @@ from .verify import (
   CertificateChainValidationError,
   SignatureVerificationError,
   MissingIdentityCertificateError,
+  RegistrarAuthorityValidationError,
+  PeerVerificationTemporarilyUnavailableError,
+  resolve_agent_identity_at_airs_registry,
 )
 from .trust_roots import refresh_trust_roots, get_trust_roots
 from .world import WorldStatus
@@ -103,6 +107,7 @@ from .devices import (
   BurnRequestResult,
   BurnConfirmResult,
   HardwareLockResult,
+  register_operator_email,
 )
 from .credential_pointers import (
   CredentialPointerError,
@@ -159,11 +164,12 @@ def _build_identity_from_local_credentials() -> Identity:
   canonical_id = creds.client_id
   handle = f"@{canonical_id}" if not canonical_id.startswith("@") else canonical_id
 
-  hsm_type: HSMType | None = None
-  if creds.private_key_pem is not None:
-    hsm_type = HSMType.SOFTWARE
-  elif creds.hsm_key_reference is not None:
-    hsm_type = HSMType.TPM
+  # AUD-F59: the enrolled local device (same rule as login and signing), not
+  # "any key reference is a TPM".
+  from .credentials import local_signing_device_type_for_credentials
+  hsm_type: HSMType | None = {
+    "piv": HSMType.YUBIKEY, "enclave": HSMType.SECURE_ENCLAVE, "tpm": HSMType.TPM, "software": HSMType.SOFTWARE,
+  }.get(local_signing_device_type_for_credentials(creds))
 
   return Identity(
     canonical_id=canonical_id,
@@ -367,6 +373,7 @@ __all__ = [
   "HandleRetiredError",
   "AuthenticationError",
   "HardwareDeviceNotPresentError",
+  "AttestationGenerationError",
   "NetworkError",
   "NotEnrolledError",
   "BinaryNotFoundError",
@@ -393,6 +400,7 @@ __all__ = [
   "HardwareLockResult",
   # Device management module
   "devices",
+  "register_operator_email",
   # Credential pointer module
   "credential_pointers",
   # Credential pointer exceptions
@@ -415,6 +423,9 @@ __all__ = [
   "CertificateChainValidationError",
   "SignatureVerificationError",
   "MissingIdentityCertificateError",
+  "RegistrarAuthorityValidationError",
+  "PeerVerificationTemporarilyUnavailableError",
+  "resolve_agent_identity_at_airs_registry",
   # Version
   "__version__",
 ]
